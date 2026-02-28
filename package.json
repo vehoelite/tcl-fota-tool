@@ -1,0 +1,33 @@
+{
+  "name": "tcl-fota",
+  "version": "1.0.0",
+  "description": "Check for firmware updates and get download URLs for TCL/REVVL Android devices",
+  "main": "tcl-fota.js",
+  "bin": {
+    "tcl-fota": "./tcl-fota.js"
+  },
+  "scripts": {
+    "start": "node tcl-fota.js",
+    "check": "node tcl-fota.js check",
+    "download": "node tcl-fota.js download"
+  },
+  "keywords": [
+    "tcl",
+    "revvl",
+    "firmware",
+    "ota",
+    "fota",
+    "update",
+    "android",
+    "alcatel"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": ""
+  }
+}
