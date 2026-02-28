@@ -40,8 +40,8 @@ The VK verification hash was reverse-engineered by decompiling the `com.tcl.fota
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-username>/tcl-fota.git
-cd tcl-fota
+git clone https://github.com/vehoelite/tcl-fota-tool.git
+cd tcl-fota-tool
 
 # Check for updates (replace with your device's CUREF and FV)
 node tcl-fota.js check --curef T702Z-EARXUS12-V --fv 9LBHZDH0
@@ -203,7 +203,7 @@ Download URLs are time-limited tokens. If a URL expires, simply run the tool aga
 - Your firmware may already be the latest version
 
 ### "VK parameter not expected"
-- This means the VK hash algorithm has changed. Please [open an issue](https://github.com/<your-username>/tcl-fota/issues).
+- This means the VK hash algorithm has changed. Please [open an issue](https://github.com/vehoelite/tcl-fota-tool/issues).
 
 ### Download URL expired
 - Run the tool again — it generates a fresh time-limited URL each time

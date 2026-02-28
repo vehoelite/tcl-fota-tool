@@ -574,7 +574,7 @@ async function runList() {
   console.log("    adb shell getprop ro.boot.hardware.curef");
   console.log("  Or check Settings → About Phone on your device.");
   console.log("");
-  console.log("  Submit new CUREFs at: https://github.com/<your-repo>/issues");
+  console.log("  Submit new CUREFs at: https://github.com/vehoelite/tcl-fota-tool/issues");
   console.log("");
 }
 
