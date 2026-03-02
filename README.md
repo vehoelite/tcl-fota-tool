@@ -140,7 +140,7 @@ Some TCL phones show the CUREF in **Settings → System → System update → Ab
 
 | Device | CUREF |
 |--------|-------|
-| TCL T702Z (Dish/Boost) | `T702Z-EARXUS12-V` |
+| [TCL T702Z (Dish/Boost)](https://imageanarchy.com/files/tcl.xl50.t702z.a15.8.0.arae.zip) | `T702Z-EARXUS12-V` |
 | TCL 30 XE 5G | `T776B-2ALGUS12-V` |
 | TCL 30 V 5G | `T781S-2ALGUS12-V` |
 | TCL 30 XL (Tracfone) | `T601DL-2AKFUS11-N` |
@@ -235,3 +235,4 @@ This tool is provided for informational and research purposes. Use at your own r
 ## License
 
 MIT
+
