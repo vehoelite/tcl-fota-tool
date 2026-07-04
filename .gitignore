@@ -3,6 +3,8 @@ node_modules/
 *.apk
 firmware/
 platform-tools/
+__pycache__/
+*.pyc
 .claude/
 .gemini/
 .mcp-debug-tools/

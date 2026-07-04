@@ -26,6 +26,7 @@ const querystring = require('querystring');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const { execFile } = require('child_process');
 
 // ─── Protocol Constants ─────────────────────────────────────────────────────
 
@@ -256,58 +257,133 @@ function extractMultipartPayloads(buffer, contentType = "") {
   return parts.length > 0 ? parts : [buffer];
 }
 
-function httpDownload(url, dest, onProgress) {
+/**
+ * Stream a URL to disk. Multipart (207) responses are still small XML/binary
+ * wrapper payloads, so those are buffered and unwrapped as before; everything
+ * else is piped straight to a write stream so multi-GB FULL-image bodies never
+ * sit fully in memory.
+ *
+ * Supports resume: if `resumeFrom` is given, sends a Range header and appends
+ * to the existing file instead of truncating it.
+ */
+function httpDownload(url, dest, onProgress, opts = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const mod = parsed.protocol === "https:" ? https : http;
+    const resumeFrom = opts.resumeFrom || 0;
 
-    const opts = {
+    const headers = { "User-Agent": USER_AGENT };
+    if (resumeFrom > 0) headers["Range"] = `bytes=${resumeFrom}-`;
+
+    const reqOpts = {
       hostname: parsed.hostname,
       port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
       path: parsed.pathname + (parsed.search || ""),
       method: "GET",
-      headers: { "User-Agent": USER_AGENT },
+      headers,
       timeout: 30000,
     };
 
-    const req = mod.request(opts, (res) => {
+    const req = mod.request(reqOpts, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return httpDownload(res.headers.location, dest, onProgress).then(resolve, reject);
+        res.resume();
+        return httpDownload(res.headers.location, dest, onProgress, opts).then(resolve, reject);
       }
+
+      // Server ignored our Range request (some slaves don't support it) — the
+      // caller's on-disk partial data is now stale, so start the file over.
+      const gotRange = res.statusCode === 206;
+      if (resumeFrom > 0 && !gotRange) {
+        fs.truncate(dest, 0, () => {});
+      }
+      const effectiveResume = gotRange ? resumeFrom : 0;
+
       if (![200, 206, 207].includes(res.statusCode)) {
+        res.resume();
         return reject(new Error(`HTTP ${res.statusCode}`));
       }
 
-      const total = parseInt(res.headers["content-length"], 10) || 0;
-      const chunks = [];
-      let received = 0;
+      const contentType = res.headers["content-type"] || "";
+      const isMultipart = res.statusCode === 207 && contentType.toLowerCase().includes("multipart");
+
+      if (isMultipart) {
+        // Multipart wrapper payloads are the small XML/JSON metadata case, not
+        // the multi-GB body case — buffering here is fine.
+        const chunks = [];
+        res.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+        res.on("end", () => {
+          const payload = Buffer.concat(extractMultipartPayloads(Buffer.concat(chunks), contentType));
+          fs.writeFile(dest, payload, (err) => {
+            if (err) return reject(err);
+            resolve({ size: payload.length });
+          });
+        });
+        res.on("error", reject);
+        return;
+      }
+
+      const contentLength = parseInt(res.headers["content-length"], 10) || 0;
+      const total = gotRange ? contentLength + effectiveResume : contentLength;
+      let received = effectiveResume;
+
+      const out = fs.createWriteStream(dest, { flags: effectiveResume > 0 ? "r+" : "w", start: effectiveResume });
 
       res.on("data", (chunk) => {
-        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        chunks.push(buffer);
-        received += buffer.length;
+        received += chunk.length;
         if (onProgress) onProgress(received, total);
       });
 
-      res.on("end", () => {
-        const payload = res.statusCode === 207 && (res.headers["content-type"] || "").toLowerCase().includes("multipart")
-          ? Buffer.concat(extractMultipartPayloads(Buffer.concat(chunks), res.headers["content-type"] || ""))
-          : Buffer.concat(chunks);
-
-        fs.writeFile(dest, payload, (err) => {
-          if (err) return reject(err);
-          resolve({ size: payload.length });
-        });
-      });
-
       res.on("error", (err) => {
+        out.destroy();
         reject(err);
       });
+
+      out.on("error", reject);
+      out.on("finish", () => resolve({ size: received }));
+
+      res.pipe(out);
     });
 
     req.on("error", reject);
     req.on("timeout", () => { req.destroy(); reject(new Error("Download timed out")); });
     req.end();
+  });
+}
+
+/**
+ * Download with automatic resume-on-failure retries. Tries up to `maxRetries`
+ * times; each retry resumes from the byte offset already on disk (if the
+ * server honors Range) instead of restarting the whole transfer.
+ */
+async function downloadWithRetry(url, dest, onProgress, opts = {}) {
+  const maxRetries = opts.maxRetries != null ? opts.maxRetries : 5;
+  let lastErr;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const resumeFrom = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
+    try {
+      return await httpDownload(url, dest, onProgress, { resumeFrom });
+    } catch (e) {
+      lastErr = e;
+      if (attempt < maxRetries) {
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 15000);
+        await new Promise((r) => setTimeout(r, backoffMs));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * SHA-1 a file on disk via streaming (no full-file buffering).
+ */
+function sha1File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha1");
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex").toLowerCase()));
+    stream.on("error", reject);
   });
 }
 
@@ -660,11 +736,12 @@ function printUsage() {
   console.log("    node tcl-fota.js list");
   console.log("");
   console.log("  HOW TO FIND YOUR CUREF AND FV:");
+  console.log("    Easiest: run `node tcl-fota.js interactive` with your phone plugged");
+  console.log("    in over USB (debugging enabled) — it reads the CUREF for you.");
   console.log("    On your TCL/REVVL phone:");
   console.log("      Settings → About Phone → look for 'CUREF' and firmware version");
   console.log("    Or via ADB:");
-  console.log("      adb shell getprop ro.boot.hardware.curef");
-  console.log("      adb shell getprop ro.build.fota.version");
+  console.log("      adb shell getprop ro.tct.curef");
   console.log("");
 }
 
@@ -681,9 +758,33 @@ function parseArgs(argv) {
   return args;
 }
 
+/**
+ * Ask a question and resolve with the trimmed answer. If stdin has already
+ * ended (e.g. piped/non-interactive input exhausted, or the terminal session
+ * dropping), `rl.question()` throws synchronously rather than calling back —
+ * catch that and resolve to "" instead of crashing. Callers already treat an
+ * empty answer as "use the default" or "nothing provided", so this degrades
+ * the same way a blank Enter press would.
+ */
 function askQuestion(rl, prompt) {
   return new Promise((resolve) => {
-    rl.question(prompt, (answer) => resolve(answer.trim()));
+    if (rl.closed) return resolve("");
+    let settled = false;
+    const onClose = () => {
+      if (!settled) { settled = true; resolve(""); }
+    };
+    rl.once("close", onClose);
+    try {
+      rl.question(prompt, (answer) => {
+        if (settled) return;
+        settled = true;
+        rl.removeListener("close", onClose);
+        resolve(answer.trim());
+      });
+    } catch (e) {
+      settled = true;
+      resolve("");
+    }
   });
 }
 
@@ -742,6 +843,73 @@ async function runDownload(curef, fv, opts = {}) {
 }
 
 /**
+ * Same flow as runDownload(), but for the GUI: emits one JSON object per
+ * line to stdout instead of formatted console output, so a caller can parse
+ * progress without scraping human-readable text. OTA (mode 2) only for now —
+ * FULL mode's many-file/multi-part flow doesn't fit this simple event model
+ * yet and stays a CLI-only feature until there's a case for a GUI FULL flow.
+ */
+function emitJson(obj) {
+  console.log(JSON.stringify(obj));
+}
+
+async function runDownloadJson(curef, fv, opts = {}) {
+  if (String(opts.mode || 2) === "4") {
+    emitJson({ type: "error", message: "FULL mode isn't supported via the GUI yet — use the CLI (`node tcl-fota.js download --mode 4`)." });
+    return;
+  }
+
+  emitJson({ type: "checking" });
+  const info = await checkUpdate(curef, fv, { ...opts, quiet: true });
+  if (!info || !info.fw_id) {
+    emitJson({ type: "no-update" });
+    return;
+  }
+  delete info._raw;
+  emitJson({ type: "update-found", info });
+
+  emitJson({ type: "requesting-url" });
+  const dlInfo = await getDownloadUrls(curef, fv, info.tv, info.fw_id, opts);
+  if (!dlInfo || !dlInfo.downloadUrl) {
+    emitJson({ type: "error", message: "Could not retrieve download URL." });
+    return;
+  }
+
+  const outDir = opts.out || process.cwd();
+  ensureDir(outDir);
+
+  const urls = buildFullUrls(dlInfo, dlInfo.downloadUrl);
+  const preferred = urls.find((u) => u.includes("us-east")) || urls[0];
+  const filename = info.filename || `firmware_${curef}_${info.tv}.zip`;
+  const dest = path.join(outDir, filename);
+
+  emitJson({ type: "downloading", filename, dest, size: parseInt(info.filesize || "0") });
+
+  const startTime = Date.now();
+  let lastEmit = 0;
+  try {
+    const result = await downloadWithRetry(preferred, dest, (received, total) => {
+      const now = Date.now();
+      if (now - lastEmit < 200 && received !== total) return; // throttle to ~5/sec
+      lastEmit = now;
+      emitJson({ type: "progress", received, total });
+    });
+
+    const elapsed = (Date.now() - startTime) / 1000;
+    let verified = null;
+    if (info.checksum) {
+      emitJson({ type: "verifying" });
+      const actual = await sha1File(dest);
+      verified = actual === info.checksum.toLowerCase();
+    }
+
+    emitJson({ type: "done", dest, size: result.size, elapsedSeconds: elapsed, verified });
+  } catch (e) {
+    emitJson({ type: "error", message: e.message, dest, resumable: true });
+  }
+}
+
+/**
  * OTA (mode 2): a single delta file, served plaintext at its DOWNLOAD_URL.
  */
 async function downloadOtaFile(curef, info, dlInfo, outDir, opts) {
@@ -758,18 +926,31 @@ async function downloadOtaFile(curef, info, dlInfo, outDir, opts) {
 
   const startTime = Date.now();
   try {
-    const result = await httpDownload(preferred, dest, drawProgress);
+    const result = await downloadWithRetry(preferred, dest, drawProgress);
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     const speed = formatBytes(result.size / (elapsed || 1));
     console.log(`\n\n  Download complete!`);
     console.log(`  File:     ${dest}`);
     console.log(`  Size:     ${formatBytes(result.size)}`);
     console.log(`  Time:     ${elapsed}s (${speed}/s)`);
-    console.log(`  Checksum: ${info.checksum}`);
-    console.log(`\n  Verify with: sha1sum "${filename}"\n`);
+
+    if (info.checksum) {
+      process.stdout.write(`  Verifying SHA-1... `);
+      const actual = await sha1File(dest);
+      if (actual === info.checksum.toLowerCase()) {
+        console.log("OK");
+      } else {
+        console.log("MISMATCH");
+        console.log(`    Expected: ${info.checksum}`);
+        console.log(`    Actual:   ${actual}`);
+        console.log(`    The file may be corrupt or incomplete — try downloading again.`);
+      }
+    }
+    console.log("");
   } catch (e) {
     console.log(`\n\n  Download failed: ${e.message}`);
     console.log(`  You can manually download from:\n    ${preferred}\n`);
+    console.log(`  Run the same command again to resume from where it left off.\n`);
   }
 }
 
@@ -798,12 +979,12 @@ async function downloadFullImage(curef, info, dlInfo, outDir) {
 
   const slaves = dlInfo.slaves || [];
   const encSlaves = dlInfo.encSlaves || [];
-  const bodyHost = slaves.find((s) => s.includes("us-east")) || slaves[0];
-  const encHost = encSlaves.find((s) => s) || null;
+  const bodyHosts = [slaves.find((s) => s.includes("us-east")), ...slaves].filter(Boolean);
+  const encHosts = encSlaves.filter(Boolean);
 
   console.log(`\n  FULL image: ${files.length} file(s) → ${fwDir}`);
-  console.log(`  Body server:   ${bodyHost || "?"}`);
-  console.log(`  Header server: ${encHost || "(none advertised)"}\n`);
+  console.log(`  Body servers:   ${bodyHosts.join(", ") || "?"}`);
+  console.log(`  Header servers: ${encHosts.join(", ") || "(none advertised)"}\n`);
 
   const manifest = {
     curef, tv: info.tv, fw_id: info.fw_id, fetched_at: new Date().toISOString(),
@@ -824,42 +1005,79 @@ async function downloadFullImage(curef, info, dlInfo, outDir) {
 
     // BODY (plaintext). With foot=1 the server's DOWNLOAD_URL is already the
     // /body-prefixed path, so use it verbatim (do not add another /body).
-    try {
-      const bodyUrl = `https://${bodyHost}${rel}`;
-      const bodyDest = path.join(fwDir, `${baseName}.body`);
-      const r = await httpDownload(bodyUrl, bodyDest, null);
-      entry.body = { file: `${baseName}.body`, size: r.size };
-    } catch (e) {
-      entry.bodyError = e.message;
-    }
-
-    // HEADER (encrypted) + per-part checksums, if an encrypt slave is available.
-    if (encHost) {
+    // Try each advertised body server in turn — a single host being down
+    // shouldn't fail the whole partition.
+    const bodyDest = path.join(fwDir, `${baseName}.body`);
+    let bodyErr = null;
+    for (const host of bodyHosts.length ? bodyHosts : [null]) {
+      if (!host) { bodyErr = new Error("no body server advertised"); break; }
       try {
-        const header = await fetchEncryptedHeader(encHost, rel);
-        const headerDest = path.join(fwDir, `${baseName}.header.enc`);
-        fs.writeFileSync(headerDest, header);
-        entry.encryptedHeader = { file: `${baseName}.header.enc`, size: header.length };
+        const bodyUrl = `https://${host}${rel}`;
+        const r = await downloadWithRetry(bodyUrl, bodyDest, null);
+        entry.body = { file: `${baseName}.body`, size: r.size };
+        bodyErr = null;
+        break;
       } catch (e) {
-        entry.headerError = e.message;
+        bodyErr = e;
       }
+    }
+    if (bodyErr) entry.bodyError = bodyErr.message;
+
+    // Per-part checksums (try each encrypt slave until one answers).
+    for (const host of encHosts) {
       try {
-        const sums = await fetchPartChecksums(encHost, rel);
-        entry.checksums = sums;
+        entry.checksums = await fetchPartChecksums(host, rel);
+        break;
       } catch (e) {
         entry.checksumError = e.message;
       }
     }
 
+    // Verify the downloaded BODY against the authoritative checksum, if we got both.
+    if (entry.body && entry.checksums && entry.checksums.body) {
+      try {
+        const actual = await sha1File(bodyDest);
+        entry.bodyVerified = actual === entry.checksums.body.toLowerCase();
+        entry.bodyActualSha1 = actual;
+      } catch (e) {
+        entry.bodyVerifyError = e.message;
+      }
+    }
+
+    // HEADER (encrypted), if an encrypt slave is available. Kept as-is (still
+    // encrypted) — this tool does not decrypt it.
+    for (const host of encHosts) {
+      try {
+        const header = await fetchEncryptedHeader(host, rel);
+        const headerDest = path.join(fwDir, `${baseName}.header.enc`);
+        fs.writeFileSync(headerDest, header);
+        entry.encryptedHeader = { file: `${baseName}.header.enc`, size: header.length };
+        break;
+      } catch (e) {
+        entry.headerError = e.message;
+      }
+    }
+
     manifest.files.push(entry);
-    console.log(entry.bodyError ? `body failed (${entry.bodyError})` : "ok");
+    let status;
+    if (entry.bodyError) status = `body failed (${entry.bodyError})`;
+    else if (entry.bodyVerified === false) status = "body CHECKSUM MISMATCH";
+    else if (entry.bodyVerified === true) status = "ok (verified)";
+    else status = "ok (unverified)";
+    console.log(status);
   }
 
   fs.writeFileSync(path.join(fwDir, "manifest.json"), JSON.stringify(manifest, null, 2));
 
   const bodies = manifest.files.filter((f) => f.body).length;
   const headers = manifest.files.filter((f) => f.encryptedHeader).length;
+  const verified = manifest.files.filter((f) => f.bodyVerified === true).length;
+  const mismatched = manifest.files.filter((f) => f.bodyVerified === false).length;
   console.log(`\n  Saved ${bodies} body file(s) and ${headers} encrypted header(s).`);
+  console.log(`  Checksum: ${verified} verified, ${mismatched} mismatched, ${bodies - verified - mismatched} unverified.`);
+  if (mismatched > 0) {
+    console.log(`  WARNING: ${mismatched} file(s) failed checksum verification — re-run to re-download them.`);
+  }
   console.log(`  Manifest: ${path.join(fwDir, "manifest.json")}`);
   console.log("");
   console.log("  ── DECRYPTION (not performed by this tool) ─────────────────────");
@@ -877,6 +1095,72 @@ function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+// ─── ADB Auto-Detection ─────────────────────────────────────────────────────
+//
+// Most non-technical users have no idea what a CUREF or FV is, let alone how
+// to run `adb shell getprop`. If a phone is already plugged in with USB
+// debugging on, we can just read those values for them. Falls back to manual
+// entry (with the same instructions as before) if adb isn't available or no
+// device is authorized — this never blocks the existing flow.
+
+function findAdbPath() {
+  const bundled = path.join(__dirname, "platform-tools", process.platform === "win32" ? "adb.exe" : "adb");
+  if (fs.existsSync(bundled)) return bundled;
+  return "adb"; // fall back to PATH
+}
+
+function runAdb(args, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    execFile(findAdbPath(), args, { timeout: timeoutMs }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(stderr && stderr.trim() ? stderr.trim() : err.message));
+      resolve(stdout.trim());
+    });
+  });
+}
+
+/**
+ * Return a list of connected, authorized device serials (skips "unauthorized"
+ * / "offline" entries from `adb devices`).
+ */
+async function listAdbDevices() {
+  let out;
+  try {
+    out = await runAdb(["devices"]);
+  } catch (e) {
+    return { available: false, reason: e.message, devices: [] };
+  }
+
+  const devices = out.split("\n").slice(1)
+    .map((line) => line.trim())
+    .filter((line) => line && line.endsWith("\tdevice"))
+    .map((line) => line.split("\t")[0]);
+
+  return { available: true, devices };
+}
+
+/**
+ * Read CUREF off a connected device via `adb shell getprop`.
+ *
+ * Verified live against real hardware: `ro.tct.curef` is the prop that
+ * actually holds it (e.g. T702Z, T601DL, T608DL all confirmed) — an earlier
+ * version of this tool queried `ro.boot.hardware.curef`, which does not
+ * exist on any tested device and always returned empty. FV has no confirmed
+ * prop name yet (candidates checked and ruled out: ro.build.fota.version,
+ * ro.tct.fv, ro.tct.software.version, ro.build.fingerprint — none match the
+ * FV format shown in Settings/the FOTA app), so it stays manual-entry-only
+ * until that's pinned down from the FOTA APK.
+ */
+async function detectDeviceProps(serial) {
+  const args = (extra) => serial ? ["-s", serial, ...extra] : extra;
+
+  const curefRaw = await runAdb(args(["shell", "getprop", "ro.tct.curef"])).catch(() => "");
+
+  return {
+    curef: curefRaw && curefRaw.trim() ? curefRaw.trim() : null,
+    fv: null,
+  };
+}
+
 async function runList() {
   printBanner();
   console.log("  Known TCL/REVVL Device CUREFs:");
@@ -889,60 +1173,133 @@ async function runList() {
 
   console.log("");
   console.log("  Don't see yours? Find it with:");
-  console.log("    adb shell getprop ro.boot.hardware.curef");
+  console.log("    adb shell getprop ro.tct.curef");
   console.log("  Or check Settings → About Phone on your device.");
   console.log("");
   console.log("  Submit new CUREFs at: https://github.com/vehoelite/tcl-fota-tool/issues");
   console.log("");
 }
 
+/**
+ * Try to fill in CUREF/FV automatically from a plugged-in phone. Returns
+ * { curef, fv } (either may be null) or null if adb/a device isn't available
+ * at all — callers should fall back to the manual picker/prompts in that case.
+ * Never throws; this is a convenience path, not a requirement.
+ */
+async function tryAutoDetect(rl) {
+  console.log("  Looking for a connected phone (USB, with USB debugging on)...");
+  const status = await listAdbDevices();
+
+  if (!status.available) {
+    console.log("  (Skipping auto-detect — adb isn't available on this computer.)\n");
+    return null;
+  }
+  if (status.devices.length === 0) {
+    console.log("  No connected/authorized device found.");
+    console.log("  Tip: plug in your phone with a USB cable, then on the phone tap");
+    console.log("  \"Allow USB debugging\" if a popup appears. If you don't see that");
+    console.log("  popup, enable Developer Options first: Settings → About Phone →");
+    console.log("  tap \"Build number\" 7 times, then Settings → System → Developer");
+    console.log("  options → turn on \"USB debugging\".\n");
+    return null;
+  }
+
+  let serial = status.devices[0];
+  if (status.devices.length > 1) {
+    console.log(`  Found ${status.devices.length} devices connected:`);
+    status.devices.forEach((d, i) => console.log(`    ${i + 1}. ${d}`));
+    const pick = await askQuestion(rl, "  Which one is your phone? [1]: ");
+    const n = parseInt(pick);
+    if (n >= 1 && n <= status.devices.length) serial = status.devices[n - 1];
+  }
+
+  console.log(`  Found a phone (${serial}). Reading its device info...`);
+  const props = await detectDeviceProps(serial);
+
+  if (props.curef) {
+    console.log(`    Device model (CUREF): ${props.curef}`);
+    console.log(`    (Firmware version isn't auto-detectable yet — you'll be asked for it next.)`);
+  } else {
+    console.log("  Couldn't read the device model from this phone (it may not be a");
+    console.log("  TCL/REVVL device, or USB debugging isn't fully authorized).\n");
+    return null;
+  }
+
+  console.log("");
+  return props;
+}
+
 async function runInteractive() {
   printBanner();
-  
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
 
   try {
-    // Show known devices
-    console.log("  Known devices:");
-    const names = Object.keys(KNOWN_DEVICES);
-    names.forEach((name, i) => {
-      console.log(`    ${i + 1}. ${name} (${KNOWN_DEVICES[name].curef})`);
-    });
-    console.log(`    ${names.length + 1}. Enter custom CUREF`);
-    console.log("");
+    let curef = null;
+    let fv = null;
 
-    const choice = await askQuestion(rl, "  Select device [number] or press Enter for custom: ");
-    let curef, fv;
+    const useAuto = await askQuestion(
+      rl,
+      "  Do you have your phone plugged into this computer with a USB cable? (Y/n): "
+    );
 
-    const choiceNum = parseInt(choice);
-    if (choiceNum >= 1 && choiceNum <= names.length) {
-      curef = KNOWN_DEVICES[names[choiceNum - 1]].curef;
-      console.log(`\n  Selected: ${names[choiceNum - 1]} → ${curef}`);
-    } else {
-      curef = await askQuestion(rl, "  Enter CUREF: ");
+    if (useAuto.toLowerCase() !== "n") {
+      const detected = await tryAutoDetect(rl);
+      if (detected) {
+        curef = detected.curef;
+        fv = detected.fv;
+      }
+    }
+
+    // Fall back to the known-device picker for whatever auto-detect didn't find.
+    if (!curef) {
+      console.log("  Known devices:");
+      const names = Object.keys(KNOWN_DEVICES);
+      names.forEach((name, i) => {
+        console.log(`    ${i + 1}. ${name} (${KNOWN_DEVICES[name].curef})`);
+      });
+      console.log(`    ${names.length + 1}. Enter custom CUREF`);
+      console.log("");
+
+      const choice = await askQuestion(rl, "  Select your device [number] or press Enter for custom: ");
+      const choiceNum = parseInt(choice);
+      if (choiceNum >= 1 && choiceNum <= names.length) {
+        curef = KNOWN_DEVICES[names[choiceNum - 1]].curef;
+        console.log(`\n  Selected: ${names[choiceNum - 1]} → ${curef}`);
+      } else {
+        curef = await askQuestion(rl, "  Enter CUREF (see Settings → About Phone, or ADB): ");
+      }
     }
 
     if (!curef) {
-      console.log("  No CUREF provided. Exiting.\n");
+      console.log("  No device selected. Exiting.\n");
       rl.close();
       return;
     }
 
-    fv = await askQuestion(rl, "  Enter current firmware version (FV): ");
     if (!fv) {
-      console.log("  No FV provided. Exiting.\n");
+      fv = await askQuestion(rl, "  Enter your phone's current firmware version (FV): ");
+    }
+    if (!fv) {
+      console.log("  No firmware version provided. Exiting.\n");
       rl.close();
       return;
     }
-
-    const modeStr = await askQuestion(rl, "  Update mode — OTA (2) or FULL (4)? [2]: ");
-    const mode = modeStr === "4" ? 4 : 2;
 
     console.log("");
-    const action = await askQuestion(rl, "  (C)heck only or (D)ownload? [C]: ");
+    console.log("  Two kinds of update:");
+    console.log("    OTA  — a small patch on top of what's already installed (faster,");
+    console.log("           works if you're just a version or two behind)");
+    console.log("    FULL — the entire firmware image (much larger, needed if OTA isn't");
+    console.log("           offered, or you're recovering a device)");
+    const modeStr = await askQuestion(rl, "  Which do you want — OTA or FULL? [OTA]: ");
+    const mode = /^f/i.test(modeStr.trim()) || modeStr.trim() === "4" ? 4 : 2;
+
+    console.log("");
+    const action = await askQuestion(rl, "  (C)heck for an update only, or (D)ownload it? [C]: ");
     rl.close();
 
     if (action.toLowerCase() === "d") {
@@ -951,7 +1308,8 @@ async function runInteractive() {
       const info = await runCheck(curef, fv, { mode });
       if (info && info.fw_id) {
         console.log("\n  To download, run:");
-        console.log(`    node tcl-fota.js download --curef ${curef} --fv ${fv}\n`);
+        console.log(`    node tcl-fota.js download --curef ${curef} --fv ${fv}${mode === 4 ? " --mode 4" : ""}\n`);
+        console.log("  Or just run `node tcl-fota.js interactive` again and choose Download.\n");
       }
     }
   } catch (e) {
@@ -1002,6 +1360,56 @@ async function main() {
       await runInteractive();
       break;
 
+    // ── Machine-readable commands ────────────────────────────────────────
+    // Used by the GUI (gui/) so it never has to parse the human-formatted
+    // console output above. Each prints exactly one JSON object (or, for
+    // download-json, a stream of newline-delimited JSON progress events)
+    // and nothing else — no banners, no console.log noise.
+
+    case "devices-json": {
+      const status = await listAdbDevices();
+      const devices = [];
+      if (status.available) {
+        for (const serial of status.devices) {
+          const props = await detectDeviceProps(serial);
+          devices.push({ serial, ...props });
+        }
+      }
+      console.log(JSON.stringify({ adbAvailable: status.available, devices }));
+      break;
+    }
+
+    case "check-json": {
+      if (!args.curef || !args.fv) {
+        console.log(JSON.stringify({ error: "curef and fv are required" }));
+        process.exit(1);
+      }
+      const info = await checkUpdate(args.curef, args.fv, {
+        mode: parseInt(args.mode) || 2,
+        osvs: args.osvs,
+        quiet: true,
+      });
+      // Drop the raw XML — it includes a multi-language description CDATA
+      // blob for every locale TCL supports, easily 50x the size of the
+      // fields the GUI actually needs.
+      if (info) delete info._raw;
+      console.log(JSON.stringify({ info }));
+      break;
+    }
+
+    case "download-json": {
+      if (!args.curef || !args.fv) {
+        console.log(JSON.stringify({ type: "error", message: "curef and fv are required" }));
+        process.exit(1);
+      }
+      await runDownloadJson(args.curef, args.fv, {
+        mode: parseInt(args.mode) || 2,
+        osvs: args.osvs,
+        out: args.out,
+      });
+      break;
+    }
+
     default:
       // If no command but has curef+fv, assume check
       if (args.curef && args.fv) {
@@ -1023,6 +1431,8 @@ if (require.main === module) {
 
 module.exports = {
   httpDownload,
+  downloadWithRetry,
+  sha1File,
   httpPost,
   checkUpdate,
   getDownloadUrls,
@@ -1034,4 +1444,7 @@ module.exports = {
   buildFullUrls,
   fetchEncryptedHeader,
   fetchPartChecksums,
+  findAdbPath,
+  listAdbDevices,
+  detectDeviceProps,
 };

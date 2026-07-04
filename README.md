@@ -17,9 +17,35 @@ Query TCL's FOTA (Firmware Over The Air) servers to check for available firmware
 - **Direct download URLs** — Get CDN links to download firmware directly
 - **Download with progress** — Built-in downloader with progress bar
 - **Interactive mode** — Guided experience, no command-line args needed
+- **Point-and-click app** — A desktop app for people who don't want to use a command line at all (see below)
 - **Known device list** — Pre-configured CUREFs for popular TCL/REVVL models
 - **Zero dependencies** — Uses only Node.js built-in modules
 - **Works for any TCL device** — TCL, REVVL (T-Mobile), Alcatel, and other TCL-made phones
+
+## Never used a command line before? Start here.
+
+You don't need to type any commands to use this tool. There's a simple point-and-click
+app for that.
+
+1. **Get the tool onto your computer.** On this page, click the green **Code** button
+   near the top, then **Download ZIP**. Once it's downloaded, right-click the ZIP file
+   and choose **Extract All…**
+2. **Open the `gui` folder** inside the extracted files.
+3. **Double-click `Start tcl-fota.bat`.**
+   - The first time you run it, it may ask you to install [Python](https://www.python.org/downloads/)
+     and/or [Node.js](https://nodejs.org/) if they aren't already on your computer — it'll
+     tell you exactly what to click. This only happens once.
+   - After that, a window will open where you can:
+     - Click **"Detect my phone"** (plug your phone into the computer with a USB cable first)
+     - Or pick your phone's model from a list if auto-detect doesn't find it
+     - Type in your firmware version (found in **Settings → About Phone** on your phone)
+     - Click **Download** and watch the progress bar
+
+That's the whole process — no typing CUREFs or FVs into a terminal required.
+
+The app only handles regular ("OTA") updates, which cover most devices and situations.
+If you need a FULL firmware image (rare — usually only for recovering a badly broken
+device), that still requires the command line; see below.
 
 ## How It Works
 
@@ -119,20 +145,34 @@ The two values you need are:
 - **CUREF** — A unique identifier for your device model + carrier variant (e.g., `T702Z-EARXUS12-V`)
 - **FV** — Your current firmware version code (e.g., `9LBHZDH0`)
 
-### Method 1: ADB (recommended)
+### Method 1: Automatic (recommended)
+
+Plug your phone into your computer with a USB cable (enable USB debugging
+first: Settings → About Phone → tap "Build number" 7 times, then Settings →
+System → Developer options → USB debugging), then run:
 
 ```bash
-adb shell getprop ro.boot.hardware.curef
-adb shell getprop ro.build.fota.version
+node tcl-fota.js interactive
 ```
 
-### Method 2: Phone Settings
+It will detect the phone and read the CUREF for you. FV isn't auto-detectable
+yet (see Method 2/3 below) — you'll still be asked to enter it.
+
+### Method 2: ADB (manual)
+
+```bash
+adb shell getprop ro.tct.curef
+```
+
+There's no confirmed `getprop` equivalent for FV yet — use Method 3 instead.
+
+### Method 3: Phone Settings
 
 Go to **Settings → About Phone** and look for:
 - "CUREF" or "Product reference"
 - "Build number" or "Firmware version"
 
-### Method 3: FOTA App
+### Method 4: FOTA App
 
 Some TCL phones show the CUREF in **Settings → System → System update → About**.
 
@@ -267,6 +307,7 @@ Contributions are welcome! Especially:
 ## Credits
 
 - **Reverse engineering** — Protocol discovered with assistance from Claude (Anthropic, Opus 4.6), by decompiling TCL's FOTA system APK using [jadx](https://github.com/skylot/jadx)
+- **v2.0 reliability, ADB auto-detect, and GUI** — Streaming/resumable downloads, checksum verification, USB device auto-detection, and the PySide6 desktop app built with assistance from Claude (Anthropic, Sonnet 5)
 - **Original research** — Earlier protocol work by [mbirth/tcl_ota_check](https://github.com/mbirth/tcl_ota_check) (archived) and [jcrutchvt10/tclotacheck](https://github.com/jcrutchvt10/tclotacheck) which documented the older API version
 - **Community** — TCL modding community for device identification and testing
 
