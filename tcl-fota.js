@@ -65,6 +65,7 @@ const KNOWN_DEVICES = {
   "TCL 30 V 5G":             { curef: "T781S-2ALGUS12-V" },
   "TCL 40 XE":               { curef: "T609DL-2ALGUS12-V" },
   "TCL 30 XL (Tracfone)":    { curef: "T601DL-2AKFUS11-N" },
+  "TCL NXTPAPER 70 Pro":     { curef: "T807W-EATBUS12-V" },
   "TCL REVVL V+ 5G":         { curef: "T618DL-2ALGUS12-V" },
   "TCL REVVL 6 5G":          { curef: "T608DL-2ALGUS12-V" },
   "TCL REVVL 6 5G (Tracfone)": { curef: "T608DL-2AKFUS11-N" },
