@@ -1366,6 +1366,15 @@ async function main() {
     // download-json, a stream of newline-delimited JSON progress events)
     // and nothing else — no banners, no console.log noise.
 
+    case "list-json": {
+      const devices = Object.entries(KNOWN_DEVICES).map(([name, info]) => ({
+        name,
+        curef: info.curef,
+      }));
+      console.log(JSON.stringify({ devices }));
+      break;
+    }
+
     case "devices-json": {
       const status = await listAdbDevices();
       const devices = [];

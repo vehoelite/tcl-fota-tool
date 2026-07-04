@@ -16,28 +16,28 @@ NODE_PATH_OVERRIDE below).
 """
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QSettings, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QRadioButton,
-    QSizePolicy,
     QStackedWidget,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -47,6 +47,8 @@ TCL_FOTA_JS = REPO_ROOT / "tcl-fota.js"
 
 # If `node` isn't on PATH, set this to a full path (e.g. r"C:\Program Files\nodejs\node.exe").
 NODE_PATH_OVERRIDE = None
+
+SETTINGS = QSettings("tcl-fota-tool", "tcl-fota-gui")
 
 
 def find_node() -> str:
@@ -125,30 +127,54 @@ class JsonLineProcess(QThread):
             self._proc.terminate()
 
 
+class PickDeviceDialog(QDialog):
+    """Shown when more than one TCL/REVVL device is connected at once, so the
+    user picks which physical phone to work with instead of the tool silently
+    guessing (it used to just take the first one adb happened to list)."""
+
+    def __init__(self, devices, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Multiple phones found")
+        self.selected = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Found {len(devices)} TCL/REVVL phones connected. Which one do you want?"))
+
+        self.list_widget = QListWidget()
+        for d in devices:
+            item = QListWidgetItem(f"{d['curef']}  (device ID: {d['serial']})")
+            item.setData(1000, d)
+            self.list_widget.addItem(item)
+        self.list_widget.setCurrentRow(0)
+        layout.addWidget(self.list_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self):
+        item = self.list_widget.currentItem()
+        if item:
+            self.selected = item.data(1000)
+        super().accept()
+
+
 class DeviceDetectPage(QWidget):
     """Step 1: find a phone over USB, or let the user pick manually."""
 
     device_chosen = Signal(str, str)  # curef, fv ("" if unknown)
 
-    KNOWN_DEVICES = {
-        "TCL 30 XE 5G": "T776B-2ALGUS12-V",
-        "TCL 30 V 5G": "T781S-2ALGUS12-V",
-        "TCL 40 XE": "T609DL-2ALGUS12-V",
-        "TCL 30 XL (Tracfone)": "T601DL-2AKFUS11-N",
-        "TCL REVVL V+ 5G": "T618DL-2ALGUS12-V",
-        "TCL REVVL 6 5G": "T608DL-2ALGUS12-V",
-        "TCL REVVL 6 5G (Tracfone)": "T608DL-2AKFUS11-N",
-        "TCL REVVL 6 Pro 5G": "T609DL-2ALGUS12-V",
-        "TCL REVVL 7 5G": "T701DL-2ALGUS12-V",
-        "TCL REVVL 7 Pro 5G": "T702DL-2ALGUS12-V",
-        "TCL T702Z (Dish/Boost)": "T702Z-EARXUS12-V",
-        "TCL NxtPaper 70 Pro (T-Mobile/Metro)": "T807W-EATBUS12-V",
-        "Alcatel Joy Tab 2": "9032Z-2ALGUS12-V",
-    }
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker = None
+        self._list_worker = None
+        # name -> curef. Populated from `node tcl-fota.js list-json` so this
+        # never drifts from the tool's own KNOWN_DEVICES list (it used to be
+        # a hand-copied duplicate here, which had already gone stale by one
+        # device). Falls back to empty (custom CUREF entry still works) if
+        # that call fails for any reason.
+        self.known_devices = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 32, 32, 32)
@@ -165,7 +191,8 @@ class DeviceDetectPage(QWidget):
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
-        self.detect_btn = QPushButton("Detect my phone")
+        self.detect_btn = QPushButton("Loading device list…")
+        self.detect_btn.setEnabled(False)
         self.detect_btn.clicked.connect(self.detect)
         layout.addWidget(self.detect_btn)
 
@@ -182,8 +209,6 @@ class DeviceDetectPage(QWidget):
 
         self.device_combo = QComboBox()
         self.device_combo.addItem("Select a device…")
-        for name in self.KNOWN_DEVICES:
-            self.device_combo.addItem(name)
         self.device_combo.addItem("Custom CUREF…")
         layout.addWidget(self.device_combo)
 
@@ -205,13 +230,47 @@ class DeviceDetectPage(QWidget):
 
         layout.addStretch()
 
+        self._load_known_devices()
+
+    def _load_known_devices(self):
+        """Pull the known-device list from tcl-fota.js itself (list-json)
+        instead of hand-copying it here, so this never goes stale relative
+        to the CLI's own KNOWN_DEVICES table. The Detect button stays
+        disabled until this finishes (or fails) — otherwise a user clicking
+        Detect right at startup could race ahead of the combo being
+        populated, and a just-detected known device would wrongly fall into
+        the "Custom CUREF" bucket instead of being recognized."""
+        self._list_worker = JsonLineProcess(["list-json"])
+        self._list_worker.line.connect(self._on_known_devices)
+        self._list_worker.failed.connect(self._on_known_devices_failed)
+        self._list_worker.start()
+
+    def _on_known_devices(self, obj):
+        for d in obj.get("devices", []):
+            self.known_devices[d["name"]] = d["curef"]
+        # Insert before "Custom CUREF…" (which is always the last item).
+        insert_at = self.device_combo.count() - 1
+        for name in self.known_devices:
+            self.device_combo.insertItem(insert_at, name)
+            insert_at += 1
+        self.detect_btn.setText("Detect my phone")
+        self.detect_btn.setEnabled(True)
+
+    def _on_known_devices_failed(self, message):
+        # Couldn't even list known devices (e.g. Node.js missing) — auto-detect
+        # over ADB won't work either, so surface the same error there instead
+        # of leaving the button stuck on "Loading…" forever.
+        self.detect_btn.setText("Detect my phone")
+        self.detect_btn.setEnabled(True)
+        self.status_label.setText(f"Couldn't load the device list: {message}")
+
     def _on_combo_changed(self, text):
         self.custom_curef_edit.setVisible(text == "Custom CUREF…")
 
     def _selected_curef(self):
         text = self.device_combo.currentText()
-        if text in self.KNOWN_DEVICES:
-            return self.KNOWN_DEVICES[text]
+        if text in self.known_devices:
+            return self.known_devices[text]
         if text == "Custom CUREF…":
             return self.custom_curef_edit.text().strip()
         return ""
@@ -226,6 +285,16 @@ class DeviceDetectPage(QWidget):
             QMessageBox.warning(self, "Missing firmware version", "Enter your current firmware version (FV).")
             return
         self.device_chosen.emit(curef, fv)
+
+    def _select_curef_in_combo(self, curef):
+        """Pre-select a detected CUREF in the combo if it's a known device,
+        else drop it into the custom field so the user doesn't retype it."""
+        for name, known_curef in self.known_devices.items():
+            if known_curef == curef:
+                self.device_combo.setCurrentText(name)
+                return
+        self.device_combo.setCurrentText("Custom CUREF…")
+        self.custom_curef_edit.setText(curef)
 
     def detect(self):
         self.detect_btn.setEnabled(False)
@@ -260,22 +329,31 @@ class DeviceDetectPage(QWidget):
                 "TCL model number from any of them. It may not be a TCL/REVVL "
                 "phone — pick your model manually below."
             )
-        else:
+        elif len(found) == 1:
             d = found[0]
             self.status_label.setText(
                 f"Found it! Model: {d['curef']}\n"
                 "Firmware version isn't auto-detectable yet — check "
                 "Settings → About Phone and type it in below."
             )
-            # Pre-select in the combo if it's a known device, else drop it into
-            # the custom field so the user doesn't have to retype it.
-            for name, curef in self.KNOWN_DEVICES.items():
-                if curef == d["curef"]:
-                    self.device_combo.setCurrentText(name)
-                    break
+            self._select_curef_in_combo(d["curef"])
+        else:
+            # More than one TCL/REVVL phone connected at once — ask which
+            # one, rather than silently guessing the first in adb's list.
+            dialog = PickDeviceDialog(found, self)
+            if dialog.exec() == QDialog.Accepted and dialog.selected:
+                d = dialog.selected
+                self.status_label.setText(
+                    f"Selected: {d['curef']} (device ID: {d['serial']})\n"
+                    "Firmware version isn't auto-detectable yet — check "
+                    "Settings → About Phone and type it in below."
+                )
+                self._select_curef_in_combo(d["curef"])
             else:
-                self.device_combo.setCurrentText("Custom CUREF…")
-                self.custom_curef_edit.setText(d["curef"])
+                self.status_label.setText(
+                    f"Found {len(found)} phones connected. Pick your device manually below, "
+                    "or click Detect again to choose from the list."
+                )
 
     def _on_failed(self, message):
         self.status_label.setText(f"Auto-detect failed: {message}")
@@ -291,7 +369,7 @@ class UpdatePage(QWidget):
         super().__init__(parent)
         self.curef = ""
         self.fv = ""
-        self.out_dir = str(Path.home() / "Downloads")
+        self.out_dir = SETTINGS.value("last_save_dir", str(Path.home() / "Downloads"))
         self._worker = None
         self._update_info = None
 
@@ -341,6 +419,7 @@ class UpdatePage(QWidget):
         d = QFileDialog.getExistingDirectory(self, "Choose download folder", self.out_edit.text())
         if d:
             self.out_edit.setText(d)
+            SETTINGS.setValue("last_save_dir", d)
 
     def start_check(self, curef: str, fv: str):
         self.curef = curef
@@ -348,8 +427,9 @@ class UpdatePage(QWidget):
         self.title.setText("Checking for updates…")
         self.info_label.setText(f"Device: {curef}\nCurrent version: {fv}")
         self.download_btn.setEnabled(False)
-        self.progress.hide()
-        self.progress_label.setText("")
+        self.progress.setRange(0, 0)  # indeterminate — we don't know how long this takes
+        self.progress.show()
+        self.progress_label.setText("Contacting TCL's update server…")
 
         self._worker = JsonLineProcess(["check-json", "--curef", curef, "--fv", fv])
         self._worker.line.connect(self._on_check_result)
@@ -357,6 +437,8 @@ class UpdatePage(QWidget):
         self._worker.start()
 
     def _on_check_result(self, obj):
+        self.progress.hide()
+        self.progress_label.setText("")
         info = obj.get("info")
         if not info or not info.get("fw_id"):
             self.title.setText("No update available")
@@ -378,6 +460,10 @@ class UpdatePage(QWidget):
 
     def _start_download(self):
         self.download_btn.setEnabled(False)
+        out_dir = self.out_edit.text().strip() or self.out_dir
+        SETTINGS.setValue("last_save_dir", out_dir)
+
+        self.progress.setRange(0, 100)
         self.progress.show()
         self.progress.setValue(0)
         self.progress_label.setText("Starting download…")
@@ -386,7 +472,7 @@ class UpdatePage(QWidget):
             "download-json",
             "--curef", self.curef,
             "--fv", self.fv,
-            "--out", self.out_edit.text().strip() or self.out_dir,
+            "--out", out_dir,
         ])
         self._worker.line.connect(self._on_download_event)
         self._worker.failed.connect(self._on_failed)
@@ -424,6 +510,7 @@ class UpdatePage(QWidget):
             self.download_btn.setEnabled(True)
 
     def _on_failed(self, message):
+        self.progress.hide()
         QMessageBox.critical(self, "Error", message)
         self.download_btn.setEnabled(True)
 
