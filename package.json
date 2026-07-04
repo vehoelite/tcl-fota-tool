@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node tcl-fota.js",
     "check": "node tcl-fota.js check",
-    "download": "node tcl-fota.js download"
+    "download": "node tcl-fota.js download",
+    "test": "node --test"
   },
   "keywords": [
     "tcl",

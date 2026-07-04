@@ -2,3 +2,9 @@ node_modules/
 *.zip
 *.apk
 firmware/
+platform-tools/
+.claude/
+.gemini/
+.mcp-debug-tools/
+.vscode/
+"Mobile Upgrade S Gotu2 v2.1.0/"

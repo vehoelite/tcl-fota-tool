@@ -65,7 +65,6 @@ const KNOWN_DEVICES = {
   "TCL 30 V 5G":             { curef: "T781S-2ALGUS12-V" },
   "TCL 40 XE":               { curef: "T609DL-2ALGUS12-V" },
   "TCL 30 XL (Tracfone)":    { curef: "T601DL-2AKFUS11-N" },
-  "TCL NXTPAPER 70 Pro":     { curef: "T807W-EATBUS12-V" },
   "TCL REVVL V+ 5G":         { curef: "T618DL-2ALGUS12-V" },
   "TCL REVVL 6 5G":          { curef: "T608DL-2ALGUS12-V" },
   "TCL REVVL 6 5G (Tracfone)": { curef: "T608DL-2AKFUS11-N" },
@@ -142,7 +141,7 @@ function buildCheckParams(curef, fv, opts = {}) {
     cktp: String(opts.cktp || 2),       // 1=auto, 2=manual
     rtd:  String(opts.rtd  || 1),       // 1=not rooted, 2=rooted
     chnl: String(opts.chnl || 2),       // 1=mobile, 2=wifi
-    osvs: String(opts.osvs || "14"),
+    osvs: String(opts.osvs || "15"),
     ckot: "2",
   };
 }
@@ -199,15 +198,50 @@ function httpPost(url, params, headers = {}) {
     };
 
     const req = mod.request(opts, (res) => {
-      let data = "";
-      res.on("data", (c) => (data += c));
-      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+      const chunks = [];
+      res.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        const bodyText = buffer.toString("utf8");
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          body: bodyText,
+          rawBody: buffer,
+          contentType: res.headers["content-type"] || "",
+        });
+      });
     });
     req.on("error", reject);
     req.on("timeout", () => { req.destroy(); reject(new Error("Request timed out")); });
     req.write(body);
     req.end();
   });
+}
+
+function extractMultipartPayloads(buffer, contentType = "") {
+  if (!contentType.toLowerCase().includes("multipart")) return [buffer];
+
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!boundaryMatch) return [buffer];
+
+  const boundary = boundaryMatch[1] || boundaryMatch[2];
+  const delimiter = `--${boundary}`;
+  const text = buffer.toString("binary");
+  const parts = [];
+
+  for (const section of text.split(delimiter)) {
+    const cleaned = section.replace(/^\r?\n/, "").replace(/\r?\n$/, "");
+    if (!cleaned || cleaned === "--") continue;
+
+    const headerEnd = cleaned.indexOf("\r\n\r\n");
+    const payload = headerEnd === -1 ? cleaned : cleaned.slice(headerEnd + 4);
+    if (payload && payload.trim() !== "") {
+      parts.push(Buffer.from(payload.replace(/\r?\n$/, ""), "binary"));
+    }
+  }
+
+  return parts.length > 0 ? parts : [buffer];
 }
 
 function httpDownload(url, dest, onProgress) {
@@ -228,28 +262,33 @@ function httpDownload(url, dest, onProgress) {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         return httpDownload(res.headers.location, dest, onProgress).then(resolve, reject);
       }
-      if (res.statusCode !== 200) {
+      if (![200, 206, 207].includes(res.statusCode)) {
         return reject(new Error(`HTTP ${res.statusCode}`));
       }
 
       const total = parseInt(res.headers["content-length"], 10) || 0;
+      const chunks = [];
       let received = 0;
-      const file = fs.createWriteStream(dest);
 
       res.on("data", (chunk) => {
-        received += chunk.length;
-        file.write(chunk);
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        chunks.push(buffer);
+        received += buffer.length;
         if (onProgress) onProgress(received, total);
       });
 
       res.on("end", () => {
-        file.end();
-        resolve({ size: received });
+        const payload = res.statusCode === 207 && (res.headers["content-type"] || "").toLowerCase().includes("multipart")
+          ? Buffer.concat(extractMultipartPayloads(Buffer.concat(chunks), res.headers["content-type"] || ""))
+          : Buffer.concat(chunks);
+
+        fs.writeFile(dest, payload, (err) => {
+          if (err) return reject(err);
+          resolve({ size: payload.length });
+        });
       });
 
       res.on("error", (err) => {
-        file.destroy();
-        fs.unlinkSync(dest);
         reject(err);
       });
     });
@@ -319,11 +358,15 @@ async function checkUpdate(curef, fv, opts = {}) {
     try {
       const res = await httpPost(url, params);
 
-      if (res.status === 200 || res.status === 206) {
+      if ([200, 206, 207].includes(res.status)) {
         if (!quiet) console.log("OK");
-        const info = parseCheckResponse(res.body);
+        const bodyText = res.body || "";
+        const candidateText = (res.contentType || "").toLowerCase().includes("multipart")
+          ? (res.rawBody ? res.rawBody.toString("utf8") : bodyText)
+          : bodyText;
+        const info = parseCheckResponse(candidateText);
         info._server = server;
-        info._raw = res.body;
+        info._raw = bodyText;
         return info;
       } else if (res.status === 204) {
         if (!quiet) console.log("no update");
@@ -447,6 +490,7 @@ function printUsage() {
   console.log("    --curef <val>   Device CUREF identifier (required for check/download)");
   console.log("    --fv <val>      Current firmware version (required for check/download)");
   console.log("    --mode <2|4>    2=OTA incremental, 4=FULL image (default: 2)");
+  console.log("    --osvs <val>    Android version to report (default: 15)");
   console.log("    --imei <val>    Device IMEI (default: dummy value)");
   console.log("    --out <dir>     Output directory for downloads (default: current dir)");
   console.log("");
@@ -659,7 +703,7 @@ async function main() {
         process.exit(1);
       }
       printBanner();
-      await runCheck(args.curef, args.fv, { mode: parseInt(args.mode) || 2 });
+      await runCheck(args.curef, args.fv, { mode: parseInt(args.mode) || 2, osvs: args.osvs });
       break;
     }
 
@@ -672,6 +716,7 @@ async function main() {
       printBanner();
       await runDownload(args.curef, args.fv, {
         mode: parseInt(args.mode) || 2,
+        osvs: args.osvs,
         out: args.out,
       });
       break;
@@ -690,7 +735,7 @@ async function main() {
       // If no command but has curef+fv, assume check
       if (args.curef && args.fv) {
         printBanner();
-        await runCheck(args.curef, args.fv, { mode: parseInt(args.mode) || 2 });
+        await runCheck(args.curef, args.fv, { mode: parseInt(args.mode) || 2, osvs: args.osvs });
       } else {
         printUsage();
       }
@@ -698,7 +743,20 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(`\n  Fatal error: ${err.message}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`\n  Fatal error: ${err.message}\n`);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  httpDownload,
+  httpPost,
+  checkUpdate,
+  getDownloadUrls,
+  buildCheckParams,
+  parseCheckResponse,
+  parseDownloadResponse,
+  buildFullUrls,
+};
