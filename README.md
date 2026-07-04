@@ -273,10 +273,9 @@ decrypt(HEADER) + BODY + FOOTER
 authoritative per-part SHA-1s (from `checksum.php`) into a `{CUREF}_{TV}_FULL/`
 folder.
 
-**What this tool does not do:** it does not decrypt the header. Decrypting it
-requires TCL's key from the `com.tcl.fota` APK. Consistent with the disclaimer
-below, the tool downloads the parts TCL's public API serves and leaves the
-decrypt-and-assemble step to the device owner. The plaintext BODY is verifiable
+**What this tool does not do yet:** it does not decrypt the header. Decrypting it
+requires TCL's key from the `com.tcl.fota` APK. I am working on writing in a header
+decrypter and will be releasing that version next. The plaintext BODY is verifiable
 against `checksums.BODY` in the manifest.
 
 ## Troubleshooting
@@ -313,7 +312,7 @@ Contributions are welcome! Especially:
 
 ## Disclaimer
 
-This tool is provided for informational and research purposes. Use at your own risk. Firmware files are property of TCL Communication. This tool does not bypass any encryption or DRM — it uses the same public API that your phone's built-in updater uses, just on your desktop.
+This tool is provided for informational and research purposes. Use at your own risk. Firmware files are property of TCL Communication. This tool uses the same public API that your phone's built-in updater uses, just on your desktop.
 
 ## License
 
