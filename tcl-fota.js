@@ -72,6 +72,8 @@ const KNOWN_DEVICES = {
   "TCL REVVL 7 5G":          { curef: "T701DL-2ALGUS12-V" },
   "TCL REVVL 7 Pro 5G":      { curef: "T702DL-2ALGUS12-V" },
   "TCL T702Z (Dish/Boost)":  { curef: "T702Z-EARXUS12-V" },
+  "TCL NxtPaper 70 Pro (T-Mobile/Metro)": { curef: "T807W-EATBUS12-V" },
+  "TCL T614SP (unconfirmed)": { curef: "T614sp-2auhus12" },
   // Alcatel
   "Alcatel Joy Tab 2":       { curef: "9032Z-2ALGUS12-V" },
   // Add more as community discovers them

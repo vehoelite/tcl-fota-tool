@@ -150,6 +150,8 @@ Some TCL phones show the CUREF in **Settings → System → System update → Ab
 | TCL REVVL 6 Pro 5G | `T609DL-2ALGUS12-V` |
 | TCL REVVL 7 5G | `T701DL-2ALGUS12-V` |
 | TCL REVVL 7 Pro 5G | `T702DL-2ALGUS12-V` |
+| TCL NxtPaper 70 Pro (T-Mobile/Metro) | `T807W-EATBUS12-V` |
+| TCL T614SP (unconfirmed) | `T614sp-2auhus12` |
 | Alcatel Joy Tab 2 | `9032Z-2ALGUS12-V` |
 
 > **Note:** Some CUREFs above are approximate. If yours doesn't work, use ADB to find the exact value. PRs with confirmed CUREFs are welcome!
