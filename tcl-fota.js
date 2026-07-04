@@ -168,13 +168,23 @@ function buildDownloadParams(curef, fv, tv, fwId, opts = {}) {
 
   const vk = computeVk(preVk);
 
-  return {
+  const params = {
     ...preVk,
     vk,
     cktp: String(opts.cktp || 2),
     rtd:  String(opts.rtd  || 1),
-    chnl: String(opts.chnl || 2),
   };
+
+  // FULL images require foot=1 (inserted after rtd, before chnl, and NOT part of
+  // the VK). Without it the server returns a bare S3 key that 404s (NoSuchKey);
+  // with it the server returns the resolvable /body/... key. See issue #3.
+  // Matches com/tcl/fota/check/impl/h.java: params.put("foot", "1") for FULL.
+  if (String(opts.mode || 2) === "4") {
+    params.foot = "1";
+  }
+
+  params.chnl = String(opts.chnl || 2);
+  return params;
 }
 
 // ─── HTTP Helpers ───────────────────────────────────────────────────────────
@@ -317,6 +327,22 @@ function xmlGetAll(xml, tag) {
 }
 
 function parseCheckResponse(xml) {
+  // A FULL image lists every partition file in <FILESET>; capture them all so a
+  // FULL download can fetch each one. OTA responses have a single <FILE>.
+  const fileset = [];
+  const fileRe = /<FILE>([\s\S]*?)<\/FILE>/g;
+  let fm;
+  while ((fm = fileRe.exec(xml)) !== null) {
+    const block = fm[1];
+    fileset.push({
+      fileId:   xmlGet(block, "FILE_ID"),
+      filename: xmlGet(block, "FILENAME"),
+      size:     xmlGet(block, "SIZE"),
+      checksum: xmlGet(block, "CHECKSUM"),
+      index:    xmlGet(block, "INDEX"),
+    });
+  }
+
   return {
     curef:      xmlGet(xml, "CUREF"),
     fv:         xmlGet(xml, "FV"),
@@ -327,6 +353,7 @@ function parseCheckResponse(xml) {
     filesize:   xmlGet(xml, "SIZE"),
     checksum:   xmlGet(xml, "CHECKSUM"),
     file_id:    xmlGet(xml, "FILE_ID"),
+    fileset,
     year:       xmlGet(xml, "year"),
     month:      xmlGet(xml, "month"),
     day:        xmlGet(xml, "day"),
@@ -334,11 +361,45 @@ function parseCheckResponse(xml) {
 }
 
 function parseDownloadResponse(xml) {
+  // Each <FILE> in <FILE_LIST> pairs a FILE_ID with its relative DOWNLOAD_URL.
+  // A FULL image is many files (one .mbn per partition); an OTA is usually one.
+  const files = [];
+  const fileRe = /<FILE>([\s\S]*?)<\/FILE>/g;
+  let fm;
+  while ((fm = fileRe.exec(xml)) !== null) {
+    const block = fm[1];
+    files.push({
+      fileId:      xmlGet(block, "FILE_ID"),
+      downloadUrl: xmlGet(block, "DOWNLOAD_URL"),
+      s3Url:       xmlGet(block, "S3_DOWNLOAD_URL"),
+    });
+  }
+
   return {
+    // First-file fields kept for backward compatibility with existing callers.
     fileId:       xmlGet(xml, "FILE_ID"),
     downloadUrl:  xmlGet(xml, "DOWNLOAD_URL"),
+    files,
     slaves:       xmlGetAll(xml, "SLAVE"),
     encSlaves:    xmlGetAll(xml, "ENCRYPT_SLAVE"),
+    s3Slaves:     xmlGetAll(xml, "S3_SLAVE"),
+  };
+}
+
+/**
+ * Parse a checksum.php response into per-part SHA-1 hashes.
+ * A FULL firmware file is delivered in three parts:
+ *   BODY           — served plaintext at https://{slave}/body{downloadUrl}
+ *   HEADER         — served encrypted via POST {encslave}/encrypt_header.php
+ *   FOOTER         — the plaintext tail; its hash is FOOTER, encrypted form ENCRYPT_FOOTER
+ * The final flashable .mbn = decrypt(header) + body + footer.
+ */
+function parseChecksumResponse(xml) {
+  return {
+    address:       xmlGet(xml, "ADDRESS"),
+    body:          xmlGet(xml, "BODY"),
+    footer:        xmlGet(xml, "FOOTER"),
+    encryptFooter: xmlGet(xml, "ENCRYPT_FOOTER"),
   };
 }
 
@@ -423,10 +484,20 @@ async function getDownloadUrls(curef, fv, tv, fwId, opts = {}) {
 }
 
 /**
- * Build full download URL list from download response
+ * Build full download URL list for a file's BODY, one per slave server.
+ *
+ * The relative path comes straight from the server's DOWNLOAD_URL and is used
+ * verbatim. The critical detail is upstream, in buildDownloadParams: sending
+ * foot=1 for FULL (mode 4) makes the server return a resolvable /body/... path;
+ * without foot the server returns a bare key that 404s (NoSuchKey). See issue #3.
+ *
+ * @param {object} dlInfo   parsed download response
+ * @param {string} [relUrl] specific file's DOWNLOAD_URL (defaults to first file)
  */
-function buildFullUrls(dlInfo) {
-  if (!dlInfo || !dlInfo.downloadUrl) return [];
+function buildFullUrls(dlInfo, relUrl) {
+  const rel = relUrl || (dlInfo && dlInfo.downloadUrl);
+  if (!dlInfo || !rel) return [];
+
   const urls = [];
   const servers = dlInfo.slaves.length > 0
     ? dlInfo.slaves
@@ -436,12 +507,98 @@ function buildFullUrls(dlInfo) {
 
   if (servers.length > 0) {
     for (const s of servers) {
-      urls.push(`https://${s}${dlInfo.downloadUrl}`);
+      urls.push(`https://${s}${rel}`);
     }
   } else {
-    urls.push(dlInfo.downloadUrl);
+    urls.push(rel);
   }
   return urls;
+}
+
+// ─── FULL-image part clients ────────────────────────────────────────────────
+//
+// A FULL firmware file is delivered in three parts (see parseChecksumResponse):
+//   BODY   — plaintext, downloadable directly (this tool can save it verbatim)
+//   HEADER — ENCRYPTED, fetched from an encrypt slave; ~4 MiB
+//   FOOTER — plaintext tail, bundled inside the encrypted header blob
+//
+// The final flashable .mbn = decrypt(HEADER) + BODY + FOOTER. Decrypting the
+// header requires TCL's proprietary key from the com.tcl.fota APK. This tool
+// deliberately does NOT decrypt — it downloads the parts TCL's public API serves
+// and leaves the decrypt/assemble step to the device owner. See DECRYPTION below.
+
+// Service credentials used by encrypt_header.php / checksum.php. These are the
+// same public service-account values the FOTA client posts (base64-wrapped here
+// only to keep them out of plain grep, exactly as the app stores them).
+const ENC_CREDS = {
+  account:  Buffer.from("VGVsZUV4dFRlc3Q=", "base64").toString("utf8"), // TeleExtTest
+  password: Buffer.from("dDA1MjM=", "base64").toString("utf8"),         // t0523
+};
+
+/**
+ * Fetch the encrypted header blob for a file from an encrypt slave.
+ * Returns the raw (still-encrypted) bytes. Expects HTTP 206.
+ */
+function fetchEncryptedHeader(encSlave, relUrl) {
+  return new Promise((resolve, reject) => {
+    const body = querystring.stringify({ ...ENC_CREDS, address: relUrl });
+    const req = http.request({
+      hostname: encSlave,
+      path: "/encrypt_header.php",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(body),
+        "User-Agent": USER_AGENT,
+      },
+      timeout: 30000,
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on("end", () => {
+        if (res.statusCode !== 206 && res.statusCode !== 200) {
+          return reject(new Error(`encrypt_header HTTP ${res.statusCode}`));
+        }
+        resolve(Buffer.concat(chunks));
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("encrypt_header timed out")); });
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Query checksum.php for a file's per-part SHA-1s (BODY / FOOTER / ENCRYPT_FOOTER).
+ */
+function fetchPartChecksums(encSlave, relUrl) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({ [relUrl]: relUrl });
+    const body = querystring.stringify({ ...ENC_CREDS, address: payload });
+    const req = http.request({
+      hostname: encSlave,
+      path: "/checksum.php",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(body),
+        "User-Agent": USER_AGENT,
+      },
+      timeout: 30000,
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on("end", () => {
+        if (res.statusCode !== 200) return reject(new Error(`checksum HTTP ${res.statusCode}`));
+        resolve(parseChecksumResponse(Buffer.concat(chunks).toString("utf8")));
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("checksum timed out")); });
+    req.write(body);
+    req.end();
+  });
 }
 
 // ─── Progress Bar ───────────────────────────────────────────────────────────
@@ -574,22 +731,30 @@ async function runDownload(curef, fv, opts = {}) {
     return;
   }
 
-  const urls = buildFullUrls(dlInfo);
-  console.log("");
-  console.log("  Download URLs:");
-  for (const url of urls) {
-    console.log(`    ${url}`);
-  }
-
-  // Pick US-East first, fallback to first available
-  const preferred = urls.find((u) => u.includes("us-east")) || urls[0];
   const outDir = opts.out || process.cwd();
+  ensureDir(outDir);
+
+  if (String(opts.mode || 2) === "4") {
+    await downloadFullImage(curef, info, dlInfo, outDir);
+  } else {
+    await downloadOtaFile(curef, info, dlInfo, outDir, opts);
+  }
+}
+
+/**
+ * OTA (mode 2): a single delta file, served plaintext at its DOWNLOAD_URL.
+ */
+async function downloadOtaFile(curef, info, dlInfo, outDir, opts) {
+  const urls = buildFullUrls(dlInfo, dlInfo.downloadUrl);
+  console.log("\n  Download URLs:");
+  for (const url of urls) console.log(`    ${url}`);
+
+  const preferred = urls.find((u) => u.includes("us-east")) || urls[0];
   const filename = info.filename || `firmware_${curef}_${info.tv}.zip`;
   const dest = path.join(outDir, filename);
 
   console.log(`\n  Downloading to: ${dest}`);
-  console.log(`  Size: ${formatBytes(parseInt(info.filesize || "0"))}`);
-  console.log("");
+  console.log(`  Size: ${formatBytes(parseInt(info.filesize || "0"))}\n`);
 
   const startTime = Date.now();
   try {
@@ -606,6 +771,110 @@ async function runDownload(curef, fv, opts = {}) {
     console.log(`\n\n  Download failed: ${e.message}`);
     console.log(`  You can manually download from:\n    ${preferred}\n`);
   }
+}
+
+/**
+ * FULL image (mode 4): many partition files. Each file is delivered in parts:
+ *   BODY   (plaintext)  — downloaded verbatim
+ *   HEADER (encrypted)  — downloaded verbatim (still encrypted)
+ *   FOOTER (plaintext)  — bundled inside the encrypted header blob
+ *
+ * We save the plaintext BODY plus the encrypted HEADER for every file, and write
+ * a manifest. Reassembling a flashable .mbn additionally requires DECRYPTING the
+ * header with TCL's key (see the DECRYPTION note printed at the end) — this tool
+ * does not perform that step.
+ */
+async function downloadFullImage(curef, info, dlInfo, outDir) {
+  const files = dlInfo.files && dlInfo.files.length ? dlInfo.files : [{
+    fileId: dlInfo.fileId, downloadUrl: dlInfo.downloadUrl,
+  }];
+
+  // Map FILE_ID -> filename/checksum from the check fileset for friendly names.
+  const byId = {};
+  for (const f of (info.fileset || [])) byId[f.fileId] = f;
+
+  const fwDir = path.join(outDir, `${curef}_${info.tv}_FULL`);
+  ensureDir(fwDir);
+
+  const slaves = dlInfo.slaves || [];
+  const encSlaves = dlInfo.encSlaves || [];
+  const bodyHost = slaves.find((s) => s.includes("us-east")) || slaves[0];
+  const encHost = encSlaves.find((s) => s) || null;
+
+  console.log(`\n  FULL image: ${files.length} file(s) → ${fwDir}`);
+  console.log(`  Body server:   ${bodyHost || "?"}`);
+  console.log(`  Header server: ${encHost || "(none advertised)"}\n`);
+
+  const manifest = {
+    curef, tv: info.tv, fw_id: info.fw_id, fetched_at: new Date().toISOString(),
+    note: "Final flashable .mbn per file = decrypt(header) + body + footer. " +
+          "Header is TCL-encrypted; this tool does not decrypt it.",
+    files: [],
+  };
+
+  let idx = 0;
+  for (const f of files) {
+    idx++;
+    const meta = byId[f.fileId] || {};
+    const baseName = meta.filename || `file_${f.fileId}`;
+    const rel = f.downloadUrl;
+    process.stdout.write(`  [${idx}/${files.length}] ${baseName} ... `);
+
+    const entry = { fileId: f.fileId, filename: baseName, index: meta.index, downloadUrl: rel };
+
+    // BODY (plaintext). With foot=1 the server's DOWNLOAD_URL is already the
+    // /body-prefixed path, so use it verbatim (do not add another /body).
+    try {
+      const bodyUrl = `https://${bodyHost}${rel}`;
+      const bodyDest = path.join(fwDir, `${baseName}.body`);
+      const r = await httpDownload(bodyUrl, bodyDest, null);
+      entry.body = { file: `${baseName}.body`, size: r.size };
+    } catch (e) {
+      entry.bodyError = e.message;
+    }
+
+    // HEADER (encrypted) + per-part checksums, if an encrypt slave is available.
+    if (encHost) {
+      try {
+        const header = await fetchEncryptedHeader(encHost, rel);
+        const headerDest = path.join(fwDir, `${baseName}.header.enc`);
+        fs.writeFileSync(headerDest, header);
+        entry.encryptedHeader = { file: `${baseName}.header.enc`, size: header.length };
+      } catch (e) {
+        entry.headerError = e.message;
+      }
+      try {
+        const sums = await fetchPartChecksums(encHost, rel);
+        entry.checksums = sums;
+      } catch (e) {
+        entry.checksumError = e.message;
+      }
+    }
+
+    manifest.files.push(entry);
+    console.log(entry.bodyError ? `body failed (${entry.bodyError})` : "ok");
+  }
+
+  fs.writeFileSync(path.join(fwDir, "manifest.json"), JSON.stringify(manifest, null, 2));
+
+  const bodies = manifest.files.filter((f) => f.body).length;
+  const headers = manifest.files.filter((f) => f.encryptedHeader).length;
+  console.log(`\n  Saved ${bodies} body file(s) and ${headers} encrypted header(s).`);
+  console.log(`  Manifest: ${path.join(fwDir, "manifest.json")}`);
+  console.log("");
+  console.log("  ── DECRYPTION (not performed by this tool) ─────────────────────");
+  console.log("  Each partition's flashable .mbn is:");
+  console.log("      decrypt(<name>.header.enc)  +  <name>.body  +  footer");
+  console.log("  The header is encrypted with TCL's key from the com.tcl.fota");
+  console.log("  APK. The plaintext BODY (checksum-valid on its own) and the");
+  console.log("  encrypted HEADER are provided so a device owner can decrypt and");
+  console.log("  assemble locally. checksums.BODY/FOOTER in manifest.json are the");
+  console.log("  authoritative per-part SHA-1s to verify against.");
+  console.log("");
+}
+
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
 async function runList() {
@@ -758,7 +1027,11 @@ module.exports = {
   checkUpdate,
   getDownloadUrls,
   buildCheckParams,
+  buildDownloadParams,
   parseCheckResponse,
   parseDownloadResponse,
+  parseChecksumResponse,
   buildFullUrls,
+  fetchEncryptedHeader,
+  fetchPartChecksums,
 };

@@ -1,6 +1,6 @@
 {
   "name": "tcl-fota",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Check for firmware updates and get download URLs for TCL/REVVL Android devices",
   "main": "tcl-fota.js",
   "bin": {

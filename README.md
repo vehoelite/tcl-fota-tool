@@ -199,6 +199,46 @@ Parameters must be in the exact LinkedHashMap order used by the FOTA app:
 
 Download URLs are time-limited tokens. If a URL expires, simply run the tool again to generate a fresh one.
 
+### FULL images (mode 4): parts and the encryption boundary
+
+An OTA update (`--mode 2`) is a single delta file served in the clear — the tool
+downloads it directly, exactly as before.
+
+A FULL image (`--mode 4`) is different. It is not one file but **many** partition
+files (38 for the T440W example), and each file is delivered in **three parts**:
+
+| Part | Source | Encrypted? |
+|------|--------|-----------|
+| **BODY** | `GET https://{slave}/body{DOWNLOAD_URL}` | No — plaintext, checksum-valid on its own |
+| **HEADER** | `POST http://{encrypt_slave}/encrypt_header.php` | **Yes** — TCL-encrypted (~4 MiB) |
+| **FOOTER** | bundled inside the encrypted header blob | Yes |
+
+The final flashable `.mbn` for each partition is:
+
+```
+decrypt(HEADER) + BODY + FOOTER
+```
+
+**Two things were required to make FULL downloads work at all** (this was
+[issue #3](https://github.com/vehoelite/tcl-fota-tool/issues/3)):
+
+1. The download request must send `foot=1` for FULL mode. Without it the server
+   returns a bare S3 key that 404s with `NoSuchKey`. With it, the server returns
+   the resolvable `/body/...` path.
+2. FULL responses list every partition file and separate `ENCRYPT_SLAVE` servers
+   for the headers.
+
+`tcl-fota download --mode 4` now saves, for every partition, the plaintext
+`*.body` and the encrypted `*.header.enc`, plus a `manifest.json` containing the
+authoritative per-part SHA-1s (from `checksum.php`) into a `{CUREF}_{TV}_FULL/`
+folder.
+
+**What this tool does not do:** it does not decrypt the header. Decrypting it
+requires TCL's key from the `com.tcl.fota` APK. Consistent with the disclaimer
+below, the tool downloads the parts TCL's public API serves and leaves the
+decrypt-and-assemble step to the device owner. The plaintext BODY is verifiable
+against `checksums.BODY` in the manifest.
+
 ## Troubleshooting
 
 ### "No update found"
