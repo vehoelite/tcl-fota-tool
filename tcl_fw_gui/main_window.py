@@ -16,8 +16,8 @@ from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
-    QWidget,
+    QProgressBar, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from tcl_fw import __version__, devices
@@ -25,7 +25,7 @@ from tcl_fw.crypto import key_hex
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
 
-from .workers import DetectWorker, LoadWorker, PullWorker
+from .workers import DetectWorker, LoadWorker, NameProbeWorker, PullWorker
 
 CREDIT = "Mode-4 header decryption by Littlenine Ennea · github.com/LittlenineEnnea"
 
@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         self._load_worker: Optional[LoadWorker] = None
         self._detect_worker: Optional[DetectWorker] = None
         self._pull_worker: Optional[PullWorker] = None
+        self._name_worker: Optional[NameProbeWorker] = None
 
         self._build_ui()
 
@@ -158,6 +159,12 @@ class MainWindow(QMainWindow):
         self.browse_btn = QPushButton("Browse…")
         self.browse_btn.clicked.connect(self.on_browse)
         orow.addWidget(self.browse_btn)
+        orow.addWidget(QLabel("Parallel:"))
+        self.parallel_spin = QSpinBox()
+        self.parallel_spin.setRange(1, 8)
+        self.parallel_spin.setValue(3)
+        self.parallel_spin.setToolTip("How many partitions to download at once.")
+        orow.addWidget(self.parallel_spin)
         self.verify_chk = QCheckBox("Verify SHA-1")
         self.verify_chk.setChecked(True)
         orow.addWidget(self.verify_chk)
@@ -245,6 +252,8 @@ class MainWindow(QMainWindow):
         if not curef:
             QMessageBox.warning(self, "No device", "Enter or pick a curef first.")
             return
+        if self._name_worker:
+            self._name_worker.cancel()
         self.table.setRowCount(0)
         self._row_of.clear()
         self._entry_of.clear()
@@ -316,6 +325,22 @@ class MainWindow(QMainWindow):
         self._log(f"Loaded {len(ordered)} parts for {curef} (tv={info.tv} fw_id={info.fw_id}).")
         self._apply_filter()
 
+        # Fill real names for unnamed body parts in the background (non-blocking).
+        unnamed = [f for f in ordered
+                   if plan.sizes.get(f.file_id, -1) > 0 and not plan.names.get(f.file_id)]
+        if unnamed:
+            self._name_worker = NameProbeWorker(plan, unnamed)
+            self._name_worker.name_resolved.connect(self._on_name_resolved)
+            self._name_worker.start()
+
+    def _on_name_resolved(self, file_id: str, name: str) -> None:
+        # Cache on the plan so pull_one reuses it (no second probe), and show it.
+        if self._plan:
+            self._plan.names[file_id] = name
+        row = self._row_of.get(file_id)
+        if row is not None:
+            self.table.item(row, C_NAME).setText(name)
+
     # ── table filtering / selection ───────────────────────────────────────
     def _apply_filter(self, *_: object) -> None:
         needle = self.filter_edit.text().strip().lower()
@@ -366,11 +391,13 @@ class MainWindow(QMainWindow):
         self.pull_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.open_btn.setEnabled(False)
-        self._status(f"Pulling {len(files)} parts → {outdir}/ …")
-        self._log(f"Pull started: {len(files)} parts → {outdir}/")
+        conc = self.parallel_spin.value()
+        self._status(f"Pulling {len(files)} parts → {outdir}/  ({conc} at a time)…")
+        self._log(f"Pull started: {len(files)} parts → {outdir}/  (parallel={conc})")
 
         self._pull_worker = PullWorker(
-            self._plan, files, outdir, verify=self.verify_chk.isChecked())
+            self._plan, files, outdir, verify=self.verify_chk.isChecked(),
+            concurrency=conc)
         self._pull_worker.file_started.connect(self._on_file_started)
         self._pull_worker.file_progress.connect(self._on_file_progress)
         self._pull_worker.file_done.connect(self._on_file_done)
@@ -463,3 +490,12 @@ class MainWindow(QMainWindow):
         path = getattr(self, "_last_outdir", None) or self.out_edit.text().strip()
         if path and os.path.isdir(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
+
+    def closeEvent(self, event) -> None:
+        """Cancel and let running workers unwind so Qt doesn't kill live threads."""
+        for w in (self._name_worker, self._pull_worker):
+            if w and w.isRunning():
+                if hasattr(w, "cancel"):
+                    w.cancel()
+                w.wait(3000)
+        super().closeEvent(event)
