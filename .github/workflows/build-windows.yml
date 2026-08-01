@@ -1,0 +1,57 @@
+name: build-windows
+
+# Build the standalone Windows executables (PyInstaller can't cross-compile,
+# so this runs on a real Windows runner). Produces:
+#   - tcl-fw.exe       (CLI)
+#   - tcl-fw-gui.exe   (PySide6 desktop app)
+# Downloadable as artifacts on every run; attached to a Release when tagged v*.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}          # lets you build from the Actions tab on demand
+
+permissions:
+  contents: write                # needed to attach files to a Release
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (with GUI + build tools)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Sanity check
+        run: |
+          python -m pytest -q
+          python -c "import tcl_fw, tcl_fw_gui; print('import OK')"
+
+      - name: Build CLI exe
+        run: pyinstaller tcl-fw.spec
+
+      - name: Build GUI exe
+        run: pyinstaller tcl-fw-gui.spec
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcl-fw-windows
+          path: |
+            dist/tcl-fw.exe
+            dist/tcl-fw-gui.exe
+
+      - name: Attach to Release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tcl-fw.exe
+            dist/tcl-fw-gui.exe
