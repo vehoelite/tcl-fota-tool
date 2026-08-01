@@ -1,0 +1,54 @@
+name: publish-pypi
+
+# Publish tcl-fw to PyPI on every v* tag, using PyPI Trusted Publishing (OIDC) —
+# no API token stored anywhere. GitHub mints a short-lived identity that PyPI
+# trusts, so releasing is just: `git tag v3.0.1 && git push --tags`.
+#
+# ONE-TIME PyPI SETUP (per project, before the first tagged run):
+#   pypi.org -> Your projects -> tcl-fw -> Publishing (or "Add a pending
+#   publisher" if the project doesn't exist yet) and register:
+#     Owner:            vehoelite
+#     Repository:       tcl-fota-tool
+#     Workflow name:    publish-pypi.yml
+#     Environment:      pypi
+# After that, tagging is fully automatic.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Sanity check the artifacts
+        run: |
+          python -m pip install twine
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi                 # matches the PyPI trusted-publisher config
+    permissions:
+      id-token: write                 # required for OIDC trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
