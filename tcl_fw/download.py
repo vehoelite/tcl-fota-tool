@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 import http.client
@@ -38,6 +39,15 @@ def sha1_file(path: str, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+def _content_range_total(cr: Optional[str]) -> Optional[int]:
+    """Parse the total size out of a 'Content-Range: bytes */12345' header."""
+    if cr and "/" in cr:
+        tail = cr.rsplit("/", 1)[-1].strip()
+        if tail.isdigit():
+            return int(tail)
+    return None
+
+
 def stream_body(slave: str, rel: str, dest: str,
                 on_progress: ProgressCb = None, resume: bool = True,
                 timeout: int = 120) -> int:
@@ -49,7 +59,21 @@ def stream_body(slave: str, rel: str, dest: str,
         headers["Range"] = "bytes=%d-" % have
 
     req = urllib.request.Request("http://%s%s" % (slave, rel), headers=headers)
-    r = urllib.request.urlopen(req, timeout=timeout)
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        # 416 = our resume offset is at/past EOF: the file is already complete
+        # (or, if the local file is longer than the remote, it's corrupt).
+        if e.code == 416 and have:
+            total = _content_range_total(e.headers.get("Content-Range"))
+            if total is not None and have > total:
+                os.remove(dest)                       # over-long → start clean
+                return stream_body(slave, rel, dest, on_progress,
+                                   resume=False, timeout=timeout)
+            if on_progress:
+                on_progress(have, total or have)
+            return have
+        raise
 
     # If the server ignored our Range (200 not 206), restart from scratch.
     mode = "ab"
