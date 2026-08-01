@@ -15,6 +15,7 @@ Python objects (DownloadInfo, PullPlan, PartResult) ride across signals as
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -84,6 +85,52 @@ class LoadWorker(QThread):
             self.failed.emit(str(e))
 
 
+class NameProbeWorker(QThread):
+    """Fill in real names for body parts the .sca join didn't cover.
+
+    Runs *after* Load so the list shows something immediately; each body's first
+    bytes are fetched in parallel and identified by content-magic, and names are
+    reported one at a time as they land. Small (header) parts are skipped — their
+    name needs a full header fetch + decrypt, which happens at pull time.
+    """
+
+    name_resolved = Signal(str, str)         # file_id, name
+    done = Signal()
+
+    def __init__(self, plan: PullPlan, files: list[FileEntry],
+                 workers: int = 12) -> None:
+        super().__init__()
+        self._plan = plan
+        self._files = files
+        self._workers = workers
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        if not self._files:
+            self.done.emit()
+            return
+        try:
+            with ThreadPoolExecutor(max_workers=self._workers) as ex:
+                futs = {ex.submit(puller._resolve_name, self._plan, f, False): f
+                        for f in self._files}
+                for fut in as_completed(futs):
+                    if self._cancel:
+                        break
+                    f = futs[fut]
+                    try:
+                        name = fut.result()
+                    except Exception:
+                        name = None
+                    if name:
+                        self.name_resolved.emit(f.file_id, name)
+        except Exception:  # noqa: BLE001 — naming is best-effort, never fatal
+            pass
+        self.done.emit()
+
+
 class PullWorker(QThread):
     """Pull a chosen subset of files, decrypting headers / streaming bodies."""
 
@@ -94,37 +141,46 @@ class PullWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, plan: PullPlan, files: list[FileEntry], outdir: str,
-                 verify: bool = True) -> None:
+                 verify: bool = True, concurrency: int = 3) -> None:
         super().__init__()
         self._plan = plan
         self._files = files
         self._outdir = outdir
         self._verify = verify
+        self._concurrency = max(1, concurrency)
         self._cancel = False
 
     def cancel(self) -> None:
         self._cancel = True
 
+    def _pull_one(self, f: FileEntry) -> Optional[PartResult]:
+        """Pull a single file (runs on a pool thread). Progress/started/done
+        signals are keyed by file_id, so concurrent pulls update independently."""
+        if self._cancel:
+            return None
+        plan = self._plan
+        name = plan.names.get(f.file_id) or f.file_id
+        total = plan.sizes.get(f.file_id, -1)
+        self.file_started.emit(f.file_id, name, total if total > 0 else 0)
+
+        def cb(got: int, tot: int, _fid=f.file_id) -> None:
+            self.file_progress.emit(_fid, got, tot or 0)
+
+        res = puller.pull_one(plan, f, self._outdir, on_progress=cb,
+                              verify=self._verify)
+        self.file_done.emit(res)
+        return res
+
     def run(self) -> None:
         try:
             os.makedirs(self._outdir, exist_ok=True)
             results: list[PartResult] = []
-            for f in self._files:
-                if self._cancel:
-                    break
-                plan = self._plan
-                name = plan.names.get(f.file_id) or f.file_id
-                total = plan.sizes.get(f.file_id, -1)
-                self.file_started.emit(f.file_id, name, total if total > 0 else 0)
-
-                def cb(got: int, tot: int, _fid=f.file_id) -> None:
-                    self.file_progress.emit(_fid, got, tot or 0)
-
-                res = puller.pull_one(
-                    plan, f, self._outdir, on_progress=cb, verify=self._verify)
-                results.append(res)
-                self.file_done.emit(res)
-
+            with ThreadPoolExecutor(max_workers=self._concurrency) as ex:
+                futs = [ex.submit(self._pull_one, f) for f in self._files]
+                for fut in as_completed(futs):
+                    r = fut.result()
+                    if r is not None:
+                        results.append(r)
             mpath = puller.write_manifest(
                 self._plan.info.curef, self._plan, results, self._outdir)
             self.finished_all.emit(results, mpath)
