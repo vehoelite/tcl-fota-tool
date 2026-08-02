@@ -188,12 +188,13 @@ def body_head(slave: str, rel: str, n: int = 64, timeout: int = 25) -> bytes:
         return b""
 
 
-def manifest(curef: str, fv: str = "000000") -> tuple[dict[str, str], Optional[str]]:
+def manifest(curef: str, fv: str = "000000",
+             mode: int = 4) -> tuple[dict[str, str], Optional[str]]:
     """check_new.php -> ({FILE_ID: coded_filename}, sca_FILE_ID). Used to give
     partitions their server-authoritative names. fv=000000 = universal 'very old'."""
     pre = OrderedDict(
         id="543212345000000", salt=salt(), curef=curef, fv=fv,
-        type="Firmware", mode="4", cltp="10",
+        type="Firmware", mode=str(mode), cltp="10",
     )
     p = OrderedDict(pre)
     p["vk"] = vk(pre, _NEW)
@@ -214,8 +215,8 @@ def manifest(curef: str, fv: str = "000000") -> tuple[dict[str, str], Optional[s
     return m, sca
 
 
-def resolve(curef: str, tv: Optional[str] = None,
-            fw_id: Optional[str] = None) -> tuple[str, Optional[str], Optional[str]]:
+def resolve(curef: str, tv: Optional[str] = None, fw_id: Optional[str] = None,
+            mode: int = 4) -> tuple[str, Optional[str], Optional[str]]:
     """Fill in a missing tv/fw_id by discovery, also trying the '-V' carrier
     variant of the curef. Returns (curef, tv, fw_id) — any may still be None if
     the server has nothing."""
@@ -223,7 +224,7 @@ def resolve(curef: str, tv: Optional[str] = None,
         return curef, tv, fw_id
     candidates = [curef] if curef.endswith("-V") else [curef, curef + "-V"]
     for cand in candidates:
-        ctv, cfw = discover(cand)
+        ctv, cfw = discover(cand, mode=mode)
         if ctv and cfw:
             return cand, tv or ctv, fw_id or cfw
     return curef, tv, fw_id

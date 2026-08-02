@@ -101,6 +101,13 @@ class MainWindow(QMainWindow):
             "curef (e.g. T704SP-EAUHUS12-V) or pick a known device")
         drow.addWidget(self.curef_box, 1)
 
+        self.mode_box = QComboBox()
+        self.mode_box.addItem("mode 4", 4)
+        self.mode_box.addItem("mode 2", 2)
+        self.mode_box.setToolTip("FOTA mode. 4 = full image (default); "
+                                 "try 2 if a device serves nothing on 4.")
+        drow.addWidget(self.mode_box)
+
         self.detect_btn = QPushButton("Detect phone")
         self.detect_btn.clicked.connect(self.on_detect)
         drow.addWidget(self.detect_btn)
@@ -272,7 +279,7 @@ class MainWindow(QMainWindow):
         self._status("Loading…")
         self._log(f"Loading {curef} …")
 
-        self._load_worker = LoadWorker(curef)
+        self._load_worker = LoadWorker(curef, mode=self.mode_box.currentData())
         self._load_worker.status.connect(self._status)
         self._load_worker.loaded.connect(self._on_loaded)
         self._load_worker.failed.connect(self._on_load_failed)

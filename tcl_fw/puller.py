@@ -46,10 +46,11 @@ class PullPlan:
 
 # ── naming ──────────────────────────────────────────────────────────────────
 
-def authoritative_names(curef: str, info: DownloadInfo) -> dict[str, str]:
+def authoritative_names(curef: str, info: DownloadInfo,
+                        mode: int = 4) -> dict[str, str]:
     """FILE_ID -> real file_name via the check_new manifest + .sca scatter.
     Returns {} if the scatter/manifest is unavailable (caller falls back)."""
-    manifest, sca_fid = fota.manifest(curef)
+    manifest, sca_fid = fota.manifest(curef, mode=mode)
     by_id = info.by_id()
     if not manifest or not sca_fid or sca_fid not in by_id:
         return {}
@@ -78,9 +79,9 @@ def authoritative_names(curef: str, info: DownloadInfo) -> dict[str, str]:
 # ── planning ────────────────────────────────────────────────────────────────
 
 def build_plan(curef: str, info: DownloadInfo,
-               probe_workers: int = 16) -> PullPlan:
+               probe_workers: int = 16, mode: int = 4) -> PullPlan:
     """Probe every file's body size (parallel) and resolve authoritative names."""
-    names = authoritative_names(curef, info)
+    names = authoritative_names(curef, info, mode=mode)
     sizes: dict[str, int] = {}
 
     def probe(f: FileEntry) -> tuple[str, int]:

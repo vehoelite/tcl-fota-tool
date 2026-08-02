@@ -55,16 +55,18 @@ class LoadWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, curef: str, tv: Optional[str] = None,
-                 fw_id: Optional[str] = None) -> None:
+                 fw_id: Optional[str] = None, mode: int = 4) -> None:
         super().__init__()
         self._curef = curef.strip()
         self._tv = tv
         self._fw_id = fw_id
+        self._mode = mode
 
     def run(self) -> None:
         try:
             self.status.emit("Resolving tv / fw_id…")
-            curef, tv, fw_id = devices.resolve(self._curef, self._tv, self._fw_id)
+            curef, tv, fw_id = devices.resolve(self._curef, self._tv, self._fw_id,
+                                               mode=self._mode)
             if not (tv and fw_id):
                 self.failed.emit(
                     f"Could not resolve tv/fw_id for {curef}. "
@@ -72,14 +74,14 @@ class LoadWorker(QThread):
                 return
 
             self.status.emit("Requesting fileset…")
-            info: DownloadInfo = fota.request_download(curef, tv, fw_id)
+            info: DownloadInfo = fota.request_download(curef, tv, fw_id, mode=self._mode)
             if not info.files:
                 self.failed.emit("Server returned an empty fileset.")
                 return
 
             self.status.emit(
                 f"Probing {len(info.files)} bodies + resolving names…")
-            plan: PullPlan = puller.build_plan(curef, info)
+            plan: PullPlan = puller.build_plan(curef, info, mode=self._mode)
             self.loaded.emit(curef, info, plan)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
