@@ -65,11 +65,21 @@ def _int(s: Optional[str]) -> int:
         return 0
 
 
+def _clean_xml(text: str) -> str:
+    """Trim padding after the XML. These scatters ship as a decrypted partition
+    whose tail is padded (form-feeds / NULs); anything after the root element
+    makes ElementTree choke, so cut at the closing root tag."""
+    i = text.rfind("</root>")
+    if i != -1:
+        return text[:i + len("</root>")]
+    return text.rstrip("\x00\x0b\x0c \t\r\n")
+
+
 def parse(xml_text: str) -> ScatterDoc:
     """Parse the MTK scatter XML into a ScatterDoc. The table is often repeated
     in the file (e.g. a second storage block); partitions are de-duplicated by
     partition_name, first occurrence wins."""
-    root = ET.fromstring(xml_text)
+    root = ET.fromstring(_clean_xml(xml_text))
 
     def find_text(path: str, default: str = "") -> str:
         el = root.find(path)

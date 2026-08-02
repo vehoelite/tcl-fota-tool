@@ -81,6 +81,29 @@ def test_scatter_txt_has_layout_and_overrides():
     assert "is_download: false" in sys_blk
 
 
+def test_parse_tolerates_decrypt_pad_after_root():
+    # Real scatters ship as a decrypted partition padded with form-feeds/NULs
+    # after </root>; ElementTree rejects that, so parse() must trim it.
+    padded = XML + "\x0c" * 32 + "\x00" * 16
+    doc = scatter.parse(padded)               # must not raise
+    assert doc.platform == "MT6835"
+    assert any(p.name == "boot_a" for p in doc.parts)
+
+
+def test_resolver_locks_already_named_files():
+    # A file whose current name already matches a scatter file_name is locked
+    # (pack idempotent; leverages the pull's .sca naming) — not re-guessed.
+    doc = _doc()
+    probes = [
+        Probe("x/boot.img", "boot.img", 60 << 20, "android", "boot", None),
+        Probe("x/system.img", "system.img", 0x3f000000, "erofs", "zero", None),
+    ]
+    matches, unmapped = flashpack.resolve(doc, probes)
+    how = {m.probe.fname: (m.part.name, m.how) for m in matches if m.part}
+    assert how["boot.img"] == ("boot_a", "already-named")
+    assert how["system.img"] == ("system_a", "already-named")
+
+
 def test_resolver_maps_by_magic_and_size():
     doc = _doc()
     probes = [
