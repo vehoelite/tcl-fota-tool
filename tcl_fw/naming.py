@@ -107,6 +107,8 @@ def identify(data: bytes, size: int) -> Identity:
         return Identity("vbmeta", size, "avb", 0.5)         # vbmeta{,_system,_vendor}
     if d[:4] == b"\xd7\xb7\xab\x1e":
         return Identity("dtbo", size, "dtbo", 1.0)
+    if d[:4] == b"\x4d\x4d\x4d\x01":
+        return Identity("preloader", size, "mmm", 1.0)
     if d[:4] == b"\x3a\xff\x26\xed":
         lab = ext4_label(d)
         return Identity(alias(lab) if lab else "sparse", size, "ext4", 0.9 if lab else 0.3)

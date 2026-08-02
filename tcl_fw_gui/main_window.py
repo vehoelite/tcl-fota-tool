@@ -25,7 +25,8 @@ from tcl_fw.crypto import key_hex
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
 
-from .workers import DetectWorker, LoadWorker, NameProbeWorker, PullWorker
+from .workers import (DetectWorker, LoadWorker, NameProbeWorker, PackWorker,
+                      PullWorker)
 
 CREDIT = "Mode-4 header decryption by Littlenine Ennea · github.com/LittlenineEnnea"
 
@@ -58,6 +59,7 @@ class MainWindow(QMainWindow):
         self._detect_worker: Optional[DetectWorker] = None
         self._pull_worker: Optional[PullWorker] = None
         self._name_worker: Optional[NameProbeWorker] = None
+        self._pack_worker: Optional[PackWorker] = None
 
         self._build_ui()
 
@@ -98,6 +100,13 @@ class MainWindow(QMainWindow):
         self.curef_box.lineEdit().setPlaceholderText(
             "curef (e.g. T704SP-EAUHUS12-V) or pick a known device")
         drow.addWidget(self.curef_box, 1)
+
+        self.mode_box = QComboBox()
+        self.mode_box.addItem("mode 4", 4)
+        self.mode_box.addItem("mode 2", 2)
+        self.mode_box.setToolTip("FOTA mode. 4 = full image (default); "
+                                 "try 2 if a device serves nothing on 4.")
+        drow.addWidget(self.mode_box)
 
         self.detect_btn = QPushButton("Detect phone")
         self.detect_btn.clicked.connect(self.on_detect)
@@ -181,6 +190,12 @@ class MainWindow(QMainWindow):
         self.cancel_btn.clicked.connect(self.on_cancel)
         self.cancel_btn.setEnabled(False)
         arow.addWidget(self.cancel_btn)
+        self.pack_btn = QPushButton("⚡ Make flashable")
+        self.pack_btn.setToolTip("Rename to real partition names + write an "
+                                 "SP Flash Tool scatter.txt.")
+        self.pack_btn.clicked.connect(self.on_pack)
+        self.pack_btn.setEnabled(False)
+        arow.addWidget(self.pack_btn)
         self.open_btn = QPushButton("Open folder")
         self.open_btn.clicked.connect(self.on_open_folder)
         self.open_btn.setEnabled(False)
@@ -264,7 +279,7 @@ class MainWindow(QMainWindow):
         self._status("Loading…")
         self._log(f"Loading {curef} …")
 
-        self._load_worker = LoadWorker(curef)
+        self._load_worker = LoadWorker(curef, mode=self.mode_box.currentData())
         self._load_worker.status.connect(self._status)
         self._load_worker.loaded.connect(self._on_loaded)
         self._load_worker.failed.connect(self._on_load_failed)
@@ -460,6 +475,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(False)
         self.pull_btn.setEnabled(True)
         self.open_btn.setEnabled(True)
+        self.pack_btn.setEnabled(True)
         ok = sum(1 for r in results if not r.error)
         dec = sum(1 for r in results if r.kind == "header" and not r.error)
         self._status(f"Done — {ok}/{len(results)} parts written ({dec} decrypted). "
@@ -486,6 +502,39 @@ class MainWindow(QMainWindow):
         if d:
             self.out_edit.setText(d)
 
+    def on_pack(self) -> None:
+        outdir = getattr(self, "_last_outdir", None) or self.out_edit.text().strip()
+        if not outdir or not os.path.isdir(outdir):
+            QMessageBox.information(self, "No folder",
+                                    "Pull a package first (or set the output folder).")
+            return
+        self.pack_btn.setEnabled(False)
+        self._status("Making flashable — mapping partitions + writing scatter…")
+        self._log(f"Pack: {outdir}")
+        self._pack_worker = PackWorker(outdir)
+        self._pack_worker.done.connect(self._on_packed)
+        self._pack_worker.failed.connect(self._on_pack_failed)
+        self._pack_worker.finished.connect(lambda: self.pack_btn.setEnabled(True))
+        self._pack_worker.start()
+
+    def _on_packed(self, result) -> None:
+        conf = [m for m in result.matches if m.part and m.confidence >= 0.7]
+        low = [m for m in result.matches if m.part and m.confidence < 0.7]
+        for m in sorted(conf, key=lambda x: -x.probe.size):
+            self._log(f"  {m.probe.fname}  →  {m.new_name}  [{m.confidence:.2f} {m.how}]")
+        if low:
+            self._log(f"  {len(low)} low-confidence left as-is (verify): "
+                      + ", ".join(f"{m.probe.fname}~{m.part.file_name}" for m in low))
+        scat = os.path.basename(result.scatter_path or "scatter.txt")
+        self._status(f"Flashable: renamed {len(conf)} partitions, wrote {scat}. "
+                     f"Load it in SP Flash Tool / mtkclient.")
+        self._log(f"  scatter → {scat}")
+
+    def _on_pack_failed(self, msg: str) -> None:
+        self._log(f"pack: {msg}")
+        self._status("Make flashable failed.")
+        QMessageBox.warning(self, "Make flashable", msg)
+
     def on_open_folder(self) -> None:
         path = getattr(self, "_last_outdir", None) or self.out_edit.text().strip()
         if path and os.path.isdir(path):
@@ -493,7 +542,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Cancel and let running workers unwind so Qt doesn't kill live threads."""
-        for w in (self._name_worker, self._pull_worker):
+        for w in (self._name_worker, self._pull_worker, self._pack_worker):
             if w and w.isRunning():
                 if hasattr(w, "cancel"):
                     w.cancel()

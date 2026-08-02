@@ -81,8 +81,8 @@ def search(query: str) -> list[KnownDevice]:
             if q in d.curef.lower() or q in (d.name or "").lower()]
 
 
-def resolve(curef: str, tv: Optional[str] = None,
-            fw_id: Optional[str] = None) -> tuple[str, Optional[str], Optional[str]]:
+def resolve(curef: str, tv: Optional[str] = None, fw_id: Optional[str] = None,
+            mode: int = 4) -> tuple[str, Optional[str], Optional[str]]:
     """Resolve a curef to (curef, tv, fw_id): explicit args win, then the
     built-in/overlay table, then a live check_new.php discovery."""
     if tv and fw_id:
@@ -90,4 +90,4 @@ def resolve(curef: str, tv: Optional[str] = None,
     known = lookup(curef)
     if known and known.tv and known.fw_id:
         return curef, tv or known.tv, fw_id or known.fw_id
-    return fota.resolve(curef, tv, fw_id)
+    return fota.resolve(curef, tv, fw_id, mode=mode)

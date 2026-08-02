@@ -20,7 +20,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from tcl_fw import adb, devices, fota, puller
+from tcl_fw import adb, devices, flashpack, fota, puller
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
 
@@ -55,16 +55,18 @@ class LoadWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, curef: str, tv: Optional[str] = None,
-                 fw_id: Optional[str] = None) -> None:
+                 fw_id: Optional[str] = None, mode: int = 4) -> None:
         super().__init__()
         self._curef = curef.strip()
         self._tv = tv
         self._fw_id = fw_id
+        self._mode = mode
 
     def run(self) -> None:
         try:
             self.status.emit("Resolving tv / fw_id…")
-            curef, tv, fw_id = devices.resolve(self._curef, self._tv, self._fw_id)
+            curef, tv, fw_id = devices.resolve(self._curef, self._tv, self._fw_id,
+                                               mode=self._mode)
             if not (tv and fw_id):
                 self.failed.emit(
                     f"Could not resolve tv/fw_id for {curef}. "
@@ -72,14 +74,14 @@ class LoadWorker(QThread):
                 return
 
             self.status.emit("Requesting fileset…")
-            info: DownloadInfo = fota.request_download(curef, tv, fw_id)
+            info: DownloadInfo = fota.request_download(curef, tv, fw_id, mode=self._mode)
             if not info.files:
                 self.failed.emit("Server returned an empty fileset.")
                 return
 
             self.status.emit(
                 f"Probing {len(info.files)} bodies + resolving names…")
-            plan: PullPlan = puller.build_plan(curef, info)
+            plan: PullPlan = puller.build_plan(curef, info, mode=self._mode)
             self.loaded.emit(curef, info, plan)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
@@ -129,6 +131,30 @@ class NameProbeWorker(QThread):
         except Exception:  # noqa: BLE001 — naming is best-effort, never fatal
             pass
         self.done.emit()
+
+
+class PackWorker(QThread):
+    """Rename a pulled folder's images to real partition names + write scatter.txt."""
+
+    done = Signal(object)                    # flashpack.PackResult
+    failed = Signal(str)
+
+    def __init__(self, pkgdir: str, min_conf: float = 0.7) -> None:
+        super().__init__()
+        self._dir = pkgdir
+        self._conf = min_conf
+
+    def run(self) -> None:
+        try:
+            result = flashpack.build(self._dir)
+            if not result:
+                self.failed.emit("No MTK scatter in this folder "
+                                 "(device may use the GOTU .sca format).")
+                return
+            flashpack.apply(self._dir, result, min_confidence=self._conf)
+            self.done.emit(result)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
 
 
 class PullWorker(QThread):
