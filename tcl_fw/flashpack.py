@@ -167,6 +167,17 @@ def resolve(doc: ScatterDoc, probes: list[Probe]) -> tuple[list[Match], list[Pro
                 return p
         return None
 
+    # Pass 0 — files already named exactly as a scatter partition's file_name
+    # (the pull's .sca naming, or a previous pack run). Lock them so pack is
+    # idempotent and doesn't re-compete already-correct names.
+    by_fname: dict[str, MtkPart] = {}
+    for p in parts:
+        by_fname.setdefault(p.file_name.lower(), p)
+    for prb in list(remaining):
+        p = by_fname.get(prb.fname.lower())
+        if p and p.name not in used_parts:
+            take(prb, p, 1.0, "already-named")
+
     # Pass 1 — strong content identity (GFH name, dtbo, vendor_boot, preloader,
     # zip->otapkg, ext4/erofs label).
     for prb in list(remaining):
@@ -255,10 +266,10 @@ def find_scatter(pkgdir: str) -> Optional[tuple[str, ScatterDoc]]:
                 continue
             with open(p, "r", encoding="utf-8", errors="replace") as f:
                 full = f.read()
+            if scatter.looks_like_mtk(full):
+                return p, scatter.parse(full)
         except Exception:
-            continue
-        if scatter.looks_like_mtk(full):
-            return p, scatter.parse(full)
+            continue                     # unreadable/unparseable scatter -> skip
     return None
 
 
