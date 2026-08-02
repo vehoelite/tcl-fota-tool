@@ -19,7 +19,7 @@ from rich.progress import (BarColumn, DownloadColumn, Progress, SpinnerColumn,
                            TextColumn, TransferSpeedColumn)
 from rich.table import Table
 
-from . import __version__, adb, devices, fota, naming, puller
+from . import __version__, adb, devices, flashpack, fota, naming, puller
 from .crypto import decrypt_header, key_hex
 
 app = typer.Typer(
@@ -133,6 +133,7 @@ def pull(
     small: bool = typer.Option(False, "--small", help="Only the small header-encrypted parts (lk/preloader/… fast)."),
     only: Optional[str] = typer.Option(None, "--only", help="Comma list of partition names to pull."),
     no_verify: bool = typer.Option(False, "--no-verify", help="Skip SHA-1 verification of bodies."),
+    pack_after: bool = typer.Option(False, "--pack", help="After pulling, rename to real partition names + write an SP Flash Tool scatter.txt."),
 ):
     """Download + decrypt a device's service package into flashable images."""
     _banner()
@@ -193,6 +194,61 @@ def pull(
     console.print(f"\n[green]✓[/] {ok}/{len(todo)} files → {out}/  "
                   f"[dim]({dec} decrypted from headers)[/]")
     console.print(f"[dim]manifest: {mpath}[/]")
+
+    if pack_after:
+        console.print()
+        _run_pack(out)
+
+
+def _run_pack(outdir: str, dry_run: bool = False, min_conf: float = 0.7) -> None:
+    """Map images to scatter partitions, rename the confident ones, and write an
+    SP Flash Tool scatter.txt. Shared by `pack` and `pull --pack`."""
+    result = flashpack.build(outdir)
+    if not result:
+        console.print("[yellow]No MTK scatter found[/] in this folder — "
+                      "nothing to pack (device may use the GOTU .sca format).")
+        return
+    conf = sorted((m for m in result.matches if m.part and m.confidence >= min_conf),
+                  key=lambda m: -m.probe.size)
+    low = sorted((m for m in result.matches if m.part and m.confidence < min_conf),
+                 key=lambda m: -m.probe.size)
+
+    tbl = Table(header_style="bold", title=f"{result.doc.platform} · {result.doc.project}")
+    tbl.add_column("current file", style="dim", no_wrap=True)
+    tbl.add_column("→ partition", style="green", no_wrap=True)
+    tbl.add_column("conf", justify="right")
+    tbl.add_column("how")
+    for m in conf:
+        tbl.add_row(m.probe.fname, m.new_name, f"{m.confidence:.2f}", m.how)
+    console.print(tbl)
+
+    path = flashpack.apply(outdir, result, dry_run=dry_run, min_confidence=min_conf)
+    verb = "would rename" if dry_run else "renamed"
+    console.print(f"[green]✓[/] {verb} {len(conf)} partitions; "
+                  f"scatter → [bold]{os.path.basename(path)}[/]")
+    if low:
+        console.print(f"\n[yellow]{len(low)} low-confidence[/] (left as-is — verify by hand):")
+        for m in low:
+            console.print(f"  [dim]{m.probe.fname}[/]  ~  {m.part.file_name}  "
+                          f"[dim]({m.confidence:.2f} {m.how})[/]")
+    if result.unmapped:
+        console.print(f"[dim]unmapped: {', '.join(p.fname for p in result.unmapped)}[/]")
+    console.print("\n[dim]Flash with SP Flash Tool (load the scatter) or mtkclient.[/]")
+
+
+@app.command()
+def pack(
+    pkgdir: str = typer.Argument(..., help="A pulled service-pack folder (pkg_<curef>/)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the mapping; rename nothing."),
+    min_conf: float = typer.Option(0.7, "--min-confidence", help="Only rename at/above this confidence."),
+):
+    """Rename a pulled folder's images to real partition names and emit an
+    SP Flash Tool scatter.txt (uses the MTK scatter that shipped in the pack)."""
+    _banner()
+    if not os.path.isdir(pkgdir):
+        console.print(f"[red]Not a folder:[/] {pkgdir}")
+        raise typer.Exit(1)
+    _run_pack(pkgdir, dry_run=dry_run, min_conf=min_conf)
 
 
 @app.command()

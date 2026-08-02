@@ -20,7 +20,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from tcl_fw import adb, devices, fota, puller
+from tcl_fw import adb, devices, flashpack, fota, puller
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
 
@@ -129,6 +129,30 @@ class NameProbeWorker(QThread):
         except Exception:  # noqa: BLE001 — naming is best-effort, never fatal
             pass
         self.done.emit()
+
+
+class PackWorker(QThread):
+    """Rename a pulled folder's images to real partition names + write scatter.txt."""
+
+    done = Signal(object)                    # flashpack.PackResult
+    failed = Signal(str)
+
+    def __init__(self, pkgdir: str, min_conf: float = 0.7) -> None:
+        super().__init__()
+        self._dir = pkgdir
+        self._conf = min_conf
+
+    def run(self) -> None:
+        try:
+            result = flashpack.build(self._dir)
+            if not result:
+                self.failed.emit("No MTK scatter in this folder "
+                                 "(device may use the GOTU .sca format).")
+                return
+            flashpack.apply(self._dir, result, min_confidence=self._conf)
+            self.done.emit(result)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
 
 
 class PullWorker(QThread):

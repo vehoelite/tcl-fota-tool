@@ -12,5 +12,5 @@ Littlenine Ennea <https://github.com/LittlenineEnnea>; mode 4 exists because
 of that work. See crypto.py.
 """
 
-__version__ = "3.1.1"
+__version__ = "3.2.0"
 __all__ = ["__version__"]

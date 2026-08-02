@@ -111,6 +111,32 @@ pkg_<curef>/
 
 Feed these to SP Flash Tool, `fastboot`, or `mtkclient`.
 
+## Make it flashable (`pack`)
+
+A service pack names every file only by a numeric ID, but it ships the device's
+**MTK scatter**. `tcl-fw` reads that scatter to rename the images to their real
+partition names and write a ready-to-load SP Flash Tool scatter:
+
+```bash
+tcl-fw pull T702Z-EARXUS12-V --pack     # pull, then auto-pack
+tcl-fw pack pkg_T702Z-EARXUS12-V        # or pack a folder you already pulled
+tcl-fw pack pkg_… --dry-run             # preview the mapping, rename nothing
+```
+
+In the GUI, click **⚡ Make flashable** after a pull. Result:
+
+```
+pkg_<curef>/
+  boot.img  init_boot.img  vendor_boot.img  dtbo.img  vbmeta*.img
+  system.img  vendor.img  product.img  system_ext.img  preloader_*.bin  …
+  MT6835_Android_scatter.txt      # load this in SP Flash Tool / mtkclient
+```
+
+Partitions are matched by content (MTK-GFH name, AVB descriptors, dtbo/boot
+magic, ext4/erofs label) and, for the big filesystem images, by size-fit against
+the scatter. Anything it can't place **confidently** is left untouched and
+listed for you to name by hand — it never guesses a partition into a wrong name.
+
 ## Related — Image Anarchy
 
 Pulled a package and want to flash, repack, or explore it? Check out
