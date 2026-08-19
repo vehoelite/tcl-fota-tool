@@ -113,6 +113,15 @@ class MainWindow(QMainWindow):
                                  "try 2 if a device serves nothing on 4.")
         drow.addWidget(self.mode_box)
 
+        self.fv_edit = QLineEdit()
+        self.fv_edit.setPlaceholderText("FV (OTA only)")
+        self.fv_edit.setToolTip(
+            "Current firmware version. Only needed for OTA (mode 2). Auto-filled "
+            "by Detect when a phone is plugged in; otherwise type it "
+            "(getprop ro.tct.sys.ver, rearranged — the phone's About screen shows it).")
+        self.fv_edit.setMaximumWidth(150)
+        drow.addWidget(self.fv_edit)
+
         self.detect_btn = QPushButton("Detect phone")
         self.detect_btn.clicked.connect(self.on_detect)
         drow.addWidget(self.detect_btn)
@@ -261,6 +270,8 @@ class MainWindow(QMainWindow):
         self.curef_box.setEditText(dev.curef)
         self._detected_curef = dev.curef
         self._detected_fv = dev.fv
+        if dev.fv:
+            self.fv_edit.setText(dev.fv)
         fv_note = f", fv {dev.fv}" if dev.fv else ""
         self._log(f"Detected {dev.name or dev.model or dev.serial} → curef {dev.curef}{fv_note}")
         self._status(f"Detected {dev.curef} — click Load.")
@@ -287,8 +298,15 @@ class MainWindow(QMainWindow):
         self._status("Loading…")
         self._log(f"Loading {curef} …")
 
-        # Use the auto-detected fv only if it belongs to the curef still shown.
-        fv = self._detected_fv if (curef == self._detected_curef and self._detected_fv) else "000000"
+        # fv for OTA (mode 2): a value typed into the FV box wins; otherwise the
+        # auto-detected fv, but only if it still belongs to the curef shown.
+        typed_fv = self.fv_edit.text().strip()
+        if typed_fv:
+            fv = typed_fv
+        elif curef == self._detected_curef and self._detected_fv:
+            fv = self._detected_fv
+        else:
+            fv = "000000"
         self._load_worker = LoadWorker(curef, mode=self.mode_box.currentData(), fv=fv)
         self._load_worker.status.connect(self._status)
         self._load_worker.loaded.connect(self._on_loaded)

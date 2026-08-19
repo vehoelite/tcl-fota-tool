@@ -55,11 +55,31 @@ def _root(
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
+def _device_fv_for(curef: str) -> Optional[str]:
+    """Read the current firmware version off a plugged-in phone whose curef
+    matches — so OTA gets a real fv without the user typing anything."""
+    if not adb.available():
+        return None
+    want = curef.lower().removesuffix("-v")
+    try:
+        for serial in adb.list_serials():
+            dev = adb.read_device(serial)
+            if dev.curef and dev.fv and dev.curef.lower().removesuffix("-v") == want:
+                return dev.fv
+    except Exception:
+        pass
+    return None
+
+
 def _auto_curef(curef: Optional[str]) -> tuple[str, Optional[str], Optional[str]]:
     """Determine the curef: explicit arg, else a plugged-in phone. Returns
-    (curef, tv_hint, fw_hint) — hints come from the device build if present."""
+    (curef, tv_hint, fw_hint) — the fw_hint (fv) is pulled from the device
+    build when a matching phone is connected, whether or not curef was typed."""
     if curef:
-        return curef, None, None
+        fv = _device_fv_for(curef)
+        if fv:
+            console.print(f"[green]Read firmware version[/] [bold]{fv}[/] from the phone.")
+        return curef, None, fv
     if adb.available():
         dev = adb.detect()
         if dev and dev.curef:
@@ -88,9 +108,21 @@ def _resolve_or_die(curef: str, tv: Optional[str], fw_id: Optional[str],
                 f"[bold]--fv <your version>[/].\n"
                 f"E.g. [bold]tcl-fw list {curef} --mode 2[/]."
             )
+        elif not fv or fv == "000000":
+            # OTA with no real firmware version — the server can't compute a
+            # delta from a placeholder. Usual cause, not a bad curef.
+            console.print(
+                f"[yellow]OTA needs this device's current firmware version.[/] "
+                f"None was found for {curef} — plug the phone in (it's read "
+                "automatically) or pass [bold]--fv <your version>[/] "
+                "(from [bold]adb shell getprop ro.tct.sys.ver[/], rearranged)."
+            )
         else:
-            console.print(f"[red]Could not resolve tv/fw_id for[/] {curef}. "
-                          "Use the exact curef or pass --tv/--fw-id.")
+            console.print(
+                f"[yellow]No OTA update offered for[/] {curef} [yellow]at firmware[/] "
+                f"{fv}. The phone may already be on the latest version, or the FV "
+                "may be wrong."
+            )
         raise typer.Exit(1)
     return curef, tv, fw_id
 

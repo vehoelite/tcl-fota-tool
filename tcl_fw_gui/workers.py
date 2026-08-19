@@ -64,8 +64,25 @@ class LoadWorker(QThread):
         self._mode = mode
         self._fv = fv or "000000"
 
+    def _autopull_fv(self) -> None:
+        """OTA needs a real fv. If none was supplied, read it straight off a
+        plugged-in phone whose curef matches — so the value is pulled, never
+        typed, whenever the device is actually connected."""
+        if self._mode != 4 and self._fv == "000000":
+            want = self._curef.lower().removesuffix("-v")
+            try:
+                for serial in adb.list_serials():
+                    dev = adb.read_device(serial)
+                    if dev.curef and dev.fv and dev.curef.lower().removesuffix("-v") == want:
+                        self._fv = dev.fv
+                        self.status.emit(f"Read firmware version {dev.fv} from the phone.")
+                        return
+            except Exception:
+                pass  # no adb / no match — fall through, resolve will report it
+
     def run(self) -> None:
         try:
+            self._autopull_fv()
             self.status.emit("Resolving tv / fw_id…")
             curef, tv, fw_id = devices.resolve(self._curef, self._tv, self._fw_id,
                                                mode=self._mode, fv=self._fv)
@@ -77,10 +94,20 @@ class LoadWorker(QThread):
                         f"No FULL image is published for {curef}. That's normal — "
                         "many devices only get OTA updates. Switch the mode selector "
                         "to OTA (mode 2) and try again.")
+                elif self._fv == "000000":
+                    # OTA with no real firmware version — the server can't compute
+                    # a delta from a placeholder. This is the usual cause, not a
+                    # bad curef.
+                    self.failed.emit(
+                        f"OTA needs this device's current firmware version, which "
+                        f"isn't set for {curef}. Plug the phone in and click Detect "
+                        "(it fills FV automatically), or type the FV in the box "
+                        "(from ro.tct.sys.ver / the phone's About screen).")
                 else:
                     self.failed.emit(
-                        f"Could not resolve tv/fw_id for {curef}. "
-                        "Check the curef, or the server has nothing for it.")
+                        f"No OTA update offered for {curef} at firmware {self._fv}. "
+                        "The phone may already be on the latest version, or the FV "
+                        "may be wrong.")
                 return
 
             self.status.emit("Requesting fileset…")
