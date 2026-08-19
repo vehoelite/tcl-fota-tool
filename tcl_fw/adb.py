@@ -23,7 +23,7 @@ from typing import Optional
 class Device:
     serial: str
     curef: Optional[str] = None
-    fv: Optional[str] = None          # ro.build.version.incremental
+    fv: Optional[str] = None          # FOTA fv, derived from ro.tct.sys.ver
     model: Optional[str] = None
     name: Optional[str] = None        # marketing name, if any
 
@@ -82,10 +82,29 @@ def _getprop(serial: str, prop: str) -> Optional[str]:
         return None
 
 
+def _fv_from_sysver(sysver: Optional[str]) -> Optional[str]:
+    """Derive the FOTA firmware version (fv) the way the stock app does.
+
+    The FOTA app (com/tcl/fota/utils/FotaUtil.java, VERSION()) does NOT use a
+    raw property — it rearranges characters of ro.tct.sys.ver:
+
+        fv = sysVer[1:4] + sysVer[6] + sysVer[4:8]
+
+    (Java substring(a,b) == Python slice [a:b].) Sanity check: this forces
+    fv[3] == fv[6] (both map to sysVer[6]), which holds for known-good values
+    9LBHZDH0 (H==H) and AXAMWTM0 (M==M). ro.build.version.incremental is a
+    build number, not this format, so it must not be used for fv.
+    """
+    s = (sysver or "").strip()
+    if len(s) < 8:
+        return None
+    return s[1:4] + s[6:7] + s[4:8]
+
+
 def read_device(serial: str) -> Device:
     """Read curef / firmware-version / model from one device."""
     curef = _getprop(serial, "ro.tct.curef") or _getprop(serial, "ro.vendor.tct.curef")
-    fv = _getprop(serial, "ro.build.version.incremental")
+    fv = _fv_from_sysver(_getprop(serial, "ro.tct.sys.ver"))
     model = _getprop(serial, "ro.product.model")
     name = _getprop(serial, "ro.tct.setupwizard.marketname") or model
     return Device(serial=serial, curef=curef, fv=fv, model=model, name=name)

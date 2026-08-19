@@ -216,15 +216,20 @@ def manifest(curef: str, fv: str = "000000",
 
 
 def resolve(curef: str, tv: Optional[str] = None, fw_id: Optional[str] = None,
-            mode: int = 4) -> tuple[str, Optional[str], Optional[str]]:
+            mode: int = 4, fv: str = "000000") -> tuple[str, Optional[str], Optional[str]]:
     """Fill in a missing tv/fw_id by discovery, also trying the '-V' carrier
     variant of the curef. Returns (curef, tv, fw_id) — any may still be None if
-    the server has nothing."""
+    the server has nothing.
+
+    fv only matters for OTA (mode 2): the server computes a delta from the
+    device's *current* firmware, so a real fv must be passed for mode 2 to
+    return anything. FULL (mode 4) is fv-independent, hence the '000000'
+    'very old build' default."""
     if tv and fw_id:
         return curef, tv, fw_id
     candidates = [curef] if curef.endswith("-V") else [curef, curef + "-V"]
     for cand in candidates:
-        ctv, cfw = discover(cand, mode=mode)
+        ctv, cfw = discover(cand, fv=fv, mode=mode)
         if ctv and cfw:
             return cand, tv or ctv, fw_id or cfw
     return curef, tv, fw_id

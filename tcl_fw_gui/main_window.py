@@ -56,6 +56,11 @@ class MainWindow(QMainWindow):
         self._row_of: dict[str, int] = {}     # file_id -> table row
         self._entry_of: dict[str, FileEntry] = {}
         self._load_worker: Optional[LoadWorker] = None
+        # fv (firmware version) from the last auto-detect, kept with its curef so
+        # OTA (mode 2) can use the device's real current version. Only trusted
+        # when the curef in the box still matches what we detected.
+        self._detected_curef: Optional[str] = None
+        self._detected_fv: Optional[str] = None
         self._detect_worker: Optional[DetectWorker] = None
         self._pull_worker: Optional[PullWorker] = None
         self._name_worker: Optional[NameProbeWorker] = None
@@ -254,7 +259,10 @@ class MainWindow(QMainWindow):
 
     def _on_detected(self, dev) -> None:
         self.curef_box.setEditText(dev.curef)
-        self._log(f"Detected {dev.name or dev.model or dev.serial} → curef {dev.curef}")
+        self._detected_curef = dev.curef
+        self._detected_fv = dev.fv
+        fv_note = f", fv {dev.fv}" if dev.fv else ""
+        self._log(f"Detected {dev.name or dev.model or dev.serial} → curef {dev.curef}{fv_note}")
         self._status(f"Detected {dev.curef} — click Load.")
 
     def _on_detect_failed(self, msg: str) -> None:
@@ -279,7 +287,9 @@ class MainWindow(QMainWindow):
         self._status("Loading…")
         self._log(f"Loading {curef} …")
 
-        self._load_worker = LoadWorker(curef, mode=self.mode_box.currentData())
+        # Use the auto-detected fv only if it belongs to the curef still shown.
+        fv = self._detected_fv if (curef == self._detected_curef and self._detected_fv) else "000000"
+        self._load_worker = LoadWorker(curef, mode=self.mode_box.currentData(), fv=fv)
         self._load_worker.status.connect(self._status)
         self._load_worker.loaded.connect(self._on_loaded)
         self._load_worker.failed.connect(self._on_load_failed)

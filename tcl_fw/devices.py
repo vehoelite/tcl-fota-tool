@@ -82,12 +82,18 @@ def search(query: str) -> list[KnownDevice]:
 
 
 def resolve(curef: str, tv: Optional[str] = None, fw_id: Optional[str] = None,
-            mode: int = 4) -> tuple[str, Optional[str], Optional[str]]:
+            mode: int = 4, fv: str = "000000") -> tuple[str, Optional[str], Optional[str]]:
     """Resolve a curef to (curef, tv, fw_id): explicit args win, then the
-    built-in/overlay table, then a live check_new.php discovery."""
+    built-in/overlay table, then a live check_new.php discovery.
+
+    fv is only consulted by discovery and only matters for OTA (mode 2) — see
+    fota.resolve. The built-in table holds FULL-image targets, so it's only
+    trusted to short-circuit a FULL (mode 4) resolve; OTA always discovers live
+    against the device's current fv."""
     if tv and fw_id:
         return curef, tv, fw_id
-    known = lookup(curef)
-    if known and known.tv and known.fw_id:
-        return curef, tv or known.tv, fw_id or known.fw_id
-    return fota.resolve(curef, tv, fw_id, mode=mode)
+    if mode == 4:
+        known = lookup(curef)
+        if known and known.tv and known.fw_id:
+            return curef, tv or known.tv, fw_id or known.fw_id
+    return fota.resolve(curef, tv, fw_id, mode=mode, fv=fv)

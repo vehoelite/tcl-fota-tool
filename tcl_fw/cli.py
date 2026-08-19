@@ -72,11 +72,25 @@ def _auto_curef(curef: Optional[str]) -> tuple[str, Optional[str], Optional[str]
 
 
 def _resolve_or_die(curef: str, tv: Optional[str], fw_id: Optional[str],
-                    mode: int = 4):
-    curef, tv, fw_id = devices.resolve(curef, tv, fw_id, mode=mode)
+                    mode: int = 4, fv: str = "000000"):
+    curef, tv, fw_id = devices.resolve(curef, tv, fw_id, mode=mode, fv=fv or "000000")
     if not (tv and fw_id):
-        console.print(f"[red]Could not resolve tv/fw_id for[/] {curef}. "
-                      "Use the exact curef or pass --tv/--fw-id.")
+        if mode == 4:
+            # A FULL (mode 4) resolve that returns nothing usually means the
+            # server recognizes the curef but publishes no whole-firmware image
+            # for it — many variants only ever get OTA deltas. Point the user at
+            # mode 2 rather than implying the curef is wrong.
+            console.print(
+                f"[yellow]No FULL image is published for[/] {curef}[yellow].[/] "
+                "That's normal — many devices only get OTA updates.\n"
+                "Try an [bold]OTA[/] check instead: [bold]--mode 2[/]. With a phone "
+                "plugged in the firmware version is read automatically; otherwise add "
+                f"[bold]--fv <your version>[/].\n"
+                f"E.g. [bold]tcl-fw list {curef} --mode 2[/]."
+            )
+        else:
+            console.print(f"[red]Could not resolve tv/fw_id for[/] {curef}. "
+                          "Use the exact curef or pass --tv/--fw-id.")
         raise typer.Exit(1)
     return curef, tv, fw_id
 
@@ -88,13 +102,15 @@ def list_cmd(
     curef: Optional[str] = typer.Argument(None, help="Device curef (auto-detects if omitted)."),
     tv: Optional[str] = typer.Option(None, "--tv"),
     fw_id: Optional[str] = typer.Option(None, "--fw-id"),
+    fv: Optional[str] = typer.Option(None, "--fv", help="Current firmware version (auto-detected if a phone is plugged in). Required for OTA (--mode 2) on a typed curef."),
     mode: int = typer.Option(4, "--mode", help="FOTA mode (4=full image; try 2 if a device serves nothing on 4)."),
 ):
     """List every partition for a device: name, size, and download URL."""
     _banner()
     curef, _, fvh = _auto_curef(curef)
-    curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode)
-    info = fota.request_download(curef, tv, fw_id, mode=mode)
+    fvh = fv or fvh
+    curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
+    info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
 
     known = devices.lookup(curef)
     console.print(f"\n[bold]{curef}[/]  {known.name if known else ''}")
@@ -136,13 +152,15 @@ def pull(
     only: Optional[str] = typer.Option(None, "--only", help="Comma list of partition names to pull."),
     no_verify: bool = typer.Option(False, "--no-verify", help="Skip SHA-1 verification of bodies."),
     pack_after: bool = typer.Option(False, "--pack", help="After pulling, rename to real partition names + write an SP Flash Tool scatter.txt."),
+    fv: Optional[str] = typer.Option(None, "--fv", help="Current firmware version (auto-detected if a phone is plugged in). Required for OTA (--mode 2) on a typed curef."),
     mode: int = typer.Option(4, "--mode", help="FOTA mode (4=full image; try 2 if a device serves nothing on 4)."),
 ):
     """Download + decrypt a device's service package into flashable images."""
     _banner()
-    curef, _, _ = _auto_curef(curef)
-    curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode)
-    info = fota.request_download(curef, tv, fw_id, mode=mode)
+    curef, _, fvh = _auto_curef(curef)
+    fvh = fv or fvh
+    curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
+    info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
 
     out = outdir or f"pkg_{curef.replace('/', '_')}"
     os.makedirs(out, exist_ok=True)

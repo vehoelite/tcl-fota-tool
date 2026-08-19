@@ -55,26 +55,38 @@ class LoadWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, curef: str, tv: Optional[str] = None,
-                 fw_id: Optional[str] = None, mode: int = 4) -> None:
+                 fw_id: Optional[str] = None, mode: int = 4,
+                 fv: str = "000000") -> None:
         super().__init__()
         self._curef = curef.strip()
         self._tv = tv
         self._fw_id = fw_id
         self._mode = mode
+        self._fv = fv or "000000"
 
     def run(self) -> None:
         try:
             self.status.emit("Resolving tv / fw_id…")
             curef, tv, fw_id = devices.resolve(self._curef, self._tv, self._fw_id,
-                                               mode=self._mode)
+                                               mode=self._mode, fv=self._fv)
             if not (tv and fw_id):
-                self.failed.emit(
-                    f"Could not resolve tv/fw_id for {curef}. "
-                    "Check the curef, or the server has nothing for it.")
+                if self._mode == 4:
+                    # No FULL image for this curef — usually means the device
+                    # only gets OTA deltas, not a bad curef. Steer to mode 2.
+                    self.failed.emit(
+                        f"No FULL image is published for {curef}. That's normal — "
+                        "many devices only get OTA updates. Switch the mode selector "
+                        "to OTA (mode 2) and try again.")
+                else:
+                    self.failed.emit(
+                        f"Could not resolve tv/fw_id for {curef}. "
+                        "Check the curef, or the server has nothing for it.")
                 return
 
             self.status.emit("Requesting fileset…")
-            info: DownloadInfo = fota.request_download(curef, tv, fw_id, mode=self._mode)
+            info: DownloadInfo = fota.request_download(
+                curef, tv, fw_id, mode=self._mode,
+                fv=self._fv if self._fv != "000000" else "AAA000")
             if not info.files:
                 self.failed.emit("Server returned an empty fileset.")
                 return
