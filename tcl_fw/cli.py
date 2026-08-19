@@ -19,7 +19,7 @@ from rich.progress import (BarColumn, DownloadColumn, Progress, SpinnerColumn,
                            TextColumn, TransferSpeedColumn)
 from rich.table import Table
 
-from . import __version__, adb, devices, flashpack, fota, naming, puller, templates
+from . import __version__, adb, devices, flashpack, fota, naming, puller, sharing, templates
 from .crypto import decrypt_header, key_hex
 
 app = typer.Typer(
@@ -51,6 +51,10 @@ def _root(
         help="Show version + credit and exit."),
 ):
     """TCL FOTA firmware puller + .mbn header decryptor."""
+    # First-run disclosure for community sharing — shown once, never hidden.
+    if sharing.notice_pending():
+        console.print(sharing.NOTICE)
+        sharing.mark_notice_shown()
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -142,6 +146,7 @@ def list_cmd(
     curef, _, fvh = _auto_curef(curef)
     fvh = fv or fvh
     curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
+    sharing.submit(curef, fvh, mode, tv, fw_id)
     info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
 
     known = devices.lookup(curef)
@@ -192,6 +197,7 @@ def pull(
     curef, _, fvh = _auto_curef(curef)
     fvh = fv or fvh
     curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
+    sharing.submit(curef, fvh, mode, tv, fw_id)
     info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
 
     out = outdir or f"pkg_{curef.replace('/', '_')}"
@@ -417,6 +423,22 @@ def refresh_cmd(
         console.print("[dim](--dry-run: nothing written)[/]")
     else:
         templates.save(tpls)
+
+
+@app.command("sharing")
+def sharing_cmd(
+    on: bool = typer.Option(False, "--on", help="Turn community device sharing ON."),
+    off: bool = typer.Option(False, "--off", help="Turn community device sharing OFF."),
+):
+    """Show or change community device-ID sharing (opt-out, nothing personal)."""
+    if on and off:
+        console.print("[red]Pick one of --on / --off.[/]")
+        raise typer.Exit(1)
+    if on or off:
+        sharing.set_enabled(on)
+        console.print(f"Community device sharing is now [bold]{'ON' if on else 'OFF'}[/].")
+        return
+    console.print(sharing.status_text())
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from tcl_fw import adb, devices, flashpack, fota, puller
+from tcl_fw import adb, devices, flashpack, fota, puller, sharing
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
 
@@ -110,6 +110,8 @@ class LoadWorker(QThread):
                         "may be wrong.")
                 return
 
+            sharing.submit(curef, None if self._fv == "000000" else self._fv,
+                           self._mode, tv, fw_id)
             self.status.emit("Requesting fileset…")
             info: DownloadInfo = fota.request_download(
                 curef, tv, fw_id, mode=self._mode,

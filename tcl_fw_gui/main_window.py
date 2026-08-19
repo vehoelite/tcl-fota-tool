@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from tcl_fw import __version__, devices, templates
+from tcl_fw import __version__, devices, sharing, templates
 from tcl_fw.crypto import key_hex
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
@@ -247,8 +247,26 @@ class MainWindow(QMainWindow):
         self.log.setObjectName("log")
         outer.addWidget(self.log)
 
+        # Community sharing (opt-out) footer
+        frow = QHBoxLayout()
+        self.share_chk = QCheckBox("Share anonymous device IDs (curef + fv) to grow the device list")
+        self.share_chk.setChecked(sharing.is_enabled())
+        self.share_chk.setToolTip("Opt-out. Shares only device/firmware identifiers — "
+                                  "no IMEI, no IP, no account.")
+        self.share_chk.toggled.connect(self._on_share_toggled)
+        frow.addWidget(self.share_chk)
+        about = QLabel('<a href="#">what\'s shared?</a>')
+        about.linkActivated.connect(
+            lambda: QDesktopServices.openUrl(QUrl(sharing.server_url() + "/about")))
+        frow.addWidget(about)
+        frow.addStretch()
+        outer.addLayout(frow)
+
         self._log(f"tcl-fw {__version__} · universal header key {key_hex()}")
         self._log(CREDIT)
+
+        # First-run disclosure, shown once after the window is up.
+        QTimer.singleShot(0, self._maybe_show_sharing_notice)
 
     # ── helpers ───────────────────────────────────────────────────────────
     def _log(self, msg: str) -> None:
@@ -256,6 +274,36 @@ class MainWindow(QMainWindow):
 
     def _status(self, msg: str) -> None:
         self.status_lbl.setText(msg)
+
+    def _on_share_toggled(self, checked: bool) -> None:
+        sharing.set_enabled(checked)
+        self._log(f"Community device sharing turned {'ON' if checked else 'OFF'}.")
+
+    def _maybe_show_sharing_notice(self) -> None:
+        """Show the opt-out disclosure once, letting the user turn it off here."""
+        if not sharing.notice_pending():
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Community device sharing")
+        box.setTextFormat(Qt.RichText)
+        box.setText(
+            "<b>tcl-fw can share the device IDs it looks up</b> (curef + firmware "
+            "version) with a community registry, so the built-in device list grows "
+            "automatically for everyone.<br><br>"
+            "<b>Shared:</b> curef, firmware version, mode, resolved build, tool version.<br>"
+            "<b>Not shared:</b> no IMEI, no IP, no account — nothing that identifies you."
+            "<br><br>It's on by default. You can turn it off now or any time from the "
+            "checkbox at the bottom of the window."
+        )
+        keep = box.addButton("Keep sharing on", QMessageBox.AcceptRole)
+        off = box.addButton("Turn it off", QMessageBox.RejectRole)
+        box.setDefaultButton(keep)
+        box.exec()
+        if box.clickedButton() is off:
+            self.share_chk.setChecked(False)   # triggers _on_share_toggled -> saves OFF
+        else:
+            sharing.set_enabled(True)
+        sharing.mark_notice_shown()
 
     def _on_curef_picked(self, index: int) -> None:
         """When a validated template is chosen, preselect the mode it serves."""
