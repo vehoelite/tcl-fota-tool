@@ -267,6 +267,8 @@ class MainWindow(QMainWindow):
 
         # First-run disclosure, shown once after the window is up.
         QTimer.singleShot(0, self._maybe_show_sharing_notice)
+        # Grow the device list from the community server (background, throttled).
+        templates.autosync_if_due()
 
     # ── helpers ───────────────────────────────────────────────────────────
     def _log(self, msg: str) -> None:

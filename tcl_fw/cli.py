@@ -55,6 +55,7 @@ def _root(
     if sharing.notice_pending():
         console.print(sharing.NOTICE)
         sharing.mark_notice_shown()
+    templates.autosync_if_due()
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -402,9 +403,9 @@ def templates_cmd(
 def refresh_cmd(
     dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Check for new releases but don't write the file."),
 ):
-    """Re-check every template against the live server and record new releases."""
+    """Re-check every curated template against the live server (maintainer op)."""
     _banner()
-    tpls = templates.load()
+    tpls = templates.load_bundled()
     if not tpls:
         console.print("[yellow]No templates to refresh.[/]")
         raise typer.Exit(1)
@@ -423,6 +424,21 @@ def refresh_cmd(
         console.print("[dim](--dry-run: nothing written)[/]")
     else:
         templates.save(tpls)
+
+
+@app.command("sync")
+def sync_cmd():
+    """Pull newly-recorded devices from the community server into your device list."""
+    _banner()
+    with console.status("Syncing device list from the community server…"):
+        added = templates.pull_from_server()
+    if added:
+        console.print(f"[bold green]Added {len(added)} new device/build(s):[/]")
+        for curef, tv, fw in added:
+            console.print(f"  [cyan]{curef}[/]  tv=[bold]{tv}[/] fw_id={fw}")
+        console.print("\n[dim]They're in your device list now (tcl-fw templates).[/]")
+    else:
+        console.print("[green]Already up to date[/] — nothing new to add.")
 
 
 @app.command("sharing")

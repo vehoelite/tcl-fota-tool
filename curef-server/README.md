@@ -27,6 +27,7 @@ accounts, names, or locations. Reads are public so anyone can audit what's held.
 |--------|------|------|---------|
 | POST | `/api/curef` | `x-tcl-key` header | record a `{curef, fv, mode, tv, fw_id, tool_version}` |
 | GET | `/api/curefs?limit=&offset=` | public | list records (newest first) |
+| GET | `/api/templates` | public | validated records reshaped as per-device release history — the feed `tcl-fw sync` merges to auto-grow its device list |
 | GET | `/api/stats` | public | `{devices, combos, total, updated}` |
 | GET | `/about` (or `/`) | public | plain-language description |
 | GET | `/healthz` | public | liveness |

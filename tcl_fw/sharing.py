@@ -52,12 +52,17 @@ NOTICE = """\
 ====================================================================="""
 
 
-def _config_dir() -> Path:
+def config_dir() -> Path:
+    """User-writable config/data dir for tcl-fw (also used for auto-grown data)."""
     if os.name == "nt":
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
     else:
         base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "tcl-fw"
+
+
+def _config_dir() -> Path:  # backward-compatible alias
+    return config_dir()
 
 
 def _config_file() -> Path:
@@ -110,6 +115,20 @@ def notice_pending() -> bool:
 def mark_notice_shown() -> None:
     cfg = _load()
     cfg.setdefault("sharing", {})["notice_shown"] = True
+    _save(cfg)
+
+
+def last_sync() -> float:
+    """Unix time of the last auto-sync of the community device list (0 if never)."""
+    try:
+        return float(_load().get("last_sync", 0))
+    except Exception:
+        return 0.0
+
+
+def mark_sync() -> None:
+    cfg = _load()
+    cfg["last_sync"] = __import__("time").time()
     _save(cfg)
 
 
