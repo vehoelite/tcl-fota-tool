@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from tcl_fw import __version__, devices
+from tcl_fw import __version__, devices, templates
 from tcl_fw.crypto import key_hex
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
@@ -97,10 +97,25 @@ class MainWindow(QMainWindow):
         self.curef_box.setEditable(True)
         self.curef_box.setMinimumWidth(320)
         self.curef_box.setInsertPolicy(QComboBox.NoInsert)
+        # Validated templates first (with a NEW tag on recent builds), then any
+        # remaining catalog devices. _tpl_mode lets us preselect the right FOTA
+        # mode when the user picks one.
+        self._tpl_mode: dict[str, int] = {}
+        seen: set[str] = set()
+        for t in sorted(templates.load(), key=lambda t: (t.name or t.curef).lower()):
+            r = t.latest()
+            tag = "   ·   NEW" if (r and r.is_new()) else ""
+            label = f"{t.curef}   ·   {t.name}{tag}" if t.name else f"{t.curef}{tag}"
+            self.curef_box.addItem(label, t.curef)
+            self._tpl_mode[t.curef] = t.mode
+            seen.add(t.curef)
         for d in devices.catalog().values():
+            if d.curef in seen:
+                continue
             label = f"{d.curef}   ·   {d.name}" if d.name else d.curef
             self.curef_box.addItem(label, d.curef)
         self.curef_box.setCurrentIndex(-1)
+        self.curef_box.currentIndexChanged.connect(self._on_curef_picked)
         self.curef_box.setEditText("")
         self.curef_box.lineEdit().setPlaceholderText(
             "curef (e.g. T704SP-EAUHUS12-V) or pick a known device")
@@ -241,6 +256,14 @@ class MainWindow(QMainWindow):
 
     def _status(self, msg: str) -> None:
         self.status_lbl.setText(msg)
+
+    def _on_curef_picked(self, index: int) -> None:
+        """When a validated template is chosen, preselect the mode it serves."""
+        mode = self._tpl_mode.get(self.curef_box.itemData(index))
+        if mode is not None:
+            i = self.mode_box.findData(mode)
+            if i >= 0:
+                self.mode_box.setCurrentIndex(i)
 
     def _current_curef(self) -> str:
         idx = self.curef_box.currentIndex()

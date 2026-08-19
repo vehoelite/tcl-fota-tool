@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "devices": [
+    {
+      "curef": "T513Z-2ARXUS12-V",
+      "name": "TCL (Dish Beryl)",
+      "mode": 4,
+      "releases": [
+        {
+          "tv": "9GCAZDA0",
+          "fw_id": "975861",
+          "first_seen": "2026-08-19",
+          "last_seen": "2026-08-19"
+        }
+      ]
+    },
+    {
+      "curef": "T513Z-EARXUS12-V",
+      "name": "TCL (Dish, EA variant)",
+      "mode": 4,
+      "releases": [
+        {
+          "tv": "9GCAZDA0",
+          "fw_id": "975713",
+          "first_seen": "2026-08-19",
+          "last_seen": "2026-08-19"
+        }
+      ]
+    },
+    {
+      "curef": "T702W-2ATBUS12",
+      "name": "TCL (T-Mobile Goldfinch)",
+      "mode": 4,
+      "releases": [
+        {
+          "tv": "6AASWTS0",
+          "fw_id": "964377",
+          "first_seen": "2026-08-19",
+          "last_seen": "2026-08-19"
+        }
+      ]
+    },
+    {
+      "curef": "T704SP-EAUHUS12-V",
+      "name": "TCL 50 XL NXTPAPER (Verizon)",
+      "mode": 4,
+      "releases": [
+        {
+          "tv": "6CEVPPV0",
+          "fw_id": "969459",
+          "first_seen": "2026-08-19",
+          "last_seen": "2026-08-19"
+        }
+      ]
+    },
+    {
+      "curef": "T704SP-2AUHUS12-V",
+      "name": "TCL 50 XL NXTPAPER (Verizon, 2A)",
+      "mode": 4,
+      "releases": [
+        {
+          "tv": "6CEVPPV0",
+          "fw_id": "969453",
+          "first_seen": "2026-08-19",
+          "last_seen": "2026-08-19"
+        }
+      ]
+    },
+    {
+      "curef": "T807W-EATBUS12-V",
+      "name": "TCL NxtPaper 70 Pro (T-Mobile/Metro)",
+      "mode": 4,
+      "releases": [
+        {
+          "tv": "AXAMWTM0",
+          "fw_id": "983299",
+          "first_seen": "2026-08-19",
+          "last_seen": "2026-08-19"
+        }
+      ]
+    },
+    {
+      "curef": "T614sp-2auhus12",
+      "name": "TCL T614SP",
+      "mode": 4,
+      "releases": [
+        {
+          "tv": "2BFWPPW0",
+          "fw_id": "930860",
+          "first_seen": "2026-08-19",
+          "last_seen": "2026-08-19"
+        }
+      ]
+    },
+    {
+      "curef": "T702Z-EARXUS12-V",
+      "name": "TCL T702Z (Dish/Boost)",
+      "mode": 4,
+      "releases": [
+        {
+          "tv": "ARAVZDV0",
+          "fw_id": "984337",
+          "first_seen": "2026-08-19",
+          "last_seen": "2026-08-19"
+        }
+      ]
+    }
+  ]
+}

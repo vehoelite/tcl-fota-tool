@@ -19,7 +19,7 @@ from rich.progress import (BarColumn, DownloadColumn, Progress, SpinnerColumn,
                            TextColumn, TransferSpeedColumn)
 from rich.table import Table
 
-from . import __version__, adb, devices, flashpack, fota, naming, puller
+from . import __version__, adb, devices, flashpack, fota, naming, puller, templates
 from .crypto import decrypt_header, key_hex
 
 app = typer.Typer(
@@ -350,6 +350,73 @@ def devices_cmd(
 
 # Typer names the command from the function; expose it as `devices`.
 app.command("devices")(devices_cmd)
+
+
+@app.command("templates")
+def templates_cmd(
+    show_all: bool = typer.Option(False, "--all", "-a", help="Show every recorded release, not just the latest per device."),
+):
+    """List validated firmware templates and their release history.
+
+    Each device carries the builds we've seen for it; a build first seen within
+    the last few weeks is tagged [bold green]NEW[/]. Run [bold]tcl-fw refresh[/]
+    to check the server for newer ones."""
+    tpls = templates.load()
+    if not tpls:
+        console.print("[yellow]No templates yet.[/] Run [bold]tcl-fw refresh[/] to build the list.")
+        return
+
+    table = Table(header_style="bold")
+    table.add_column("CUREF", style="cyan", no_wrap=True)
+    table.add_column("MODE", justify="center", style="dim")
+    table.add_column("TV", style="dim")
+    table.add_column("FW_ID", style="dim")
+    table.add_column("FIRST SEEN", style="dim")
+    table.add_column("")               # NEW tag
+    table.add_column("NAME")
+
+    for t in sorted(tpls, key=lambda t: (t.name or t.curef).lower()):
+        rels = sorted(t.releases, key=lambda r: r.first_seen, reverse=True)
+        if not show_all:
+            rels = rels[:1]
+        for i, r in enumerate(rels):
+            tag = "[bold green]NEW[/]" if r.is_new() else ""
+            table.add_row(
+                t.curef if i == 0 else "",
+                str(t.mode) if i == 0 else "",
+                r.tv, r.fw_id, r.first_seen, tag,
+                (t.name if i == 0 else ""),
+            )
+    console.print(table)
+    console.print("\n[dim]Downloads always resolve the current build live; "
+                  "this list is a validated record. `tcl-fw refresh` checks for newer.[/]")
+
+
+@app.command("refresh")
+def refresh_cmd(
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Check for new releases but don't write the file."),
+):
+    """Re-check every template against the live server and record new releases."""
+    _banner()
+    tpls = templates.load()
+    if not tpls:
+        console.print("[yellow]No templates to refresh.[/]")
+        raise typer.Exit(1)
+
+    with console.status(f"Checking {len(tpls)} devices for new firmware…"):
+        added = templates.refresh(tpls)
+
+    if added:
+        console.print(f"[bold green]{len(added)} new release(s):[/]")
+        for curef, tv, fw in added:
+            console.print(f"  [cyan]{curef}[/]  tv=[bold]{tv}[/] fw_id={fw}")
+    else:
+        console.print("[green]Up to date[/] — no new firmware since the last check.")
+
+    if dry_run:
+        console.print("[dim](--dry-run: nothing written)[/]")
+    else:
+        templates.save(tpls)
 
 
 if __name__ == "__main__":
