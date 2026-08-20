@@ -44,6 +44,11 @@ SHA-1 verification, all over the exact same backend as the CLI. On Windows the
 GUI uses the native `adb`, so **Detect phone** works without any usbipd/WSL
 plumbing.
 
+Click **🔥 Firmware (Auto-updated)** to browse the community device database in
+place of the partition list — every device/build the tool has learned about
+(CUREF/MODEL, Version, Date, Size, Mode, SW ver). Double-click a row to load
+that device. The list grows on its own (see below).
+
 ## Quickstart
 
 ```bash
@@ -72,6 +77,36 @@ adb shell getprop ro.tct.curef
 | `tcl-fw list [curef]` | Resolve a device and list every partition: name, real size, and whether it comes from the body or the encrypted header. |
 | `tcl-fw decrypt <blob>` | Decrypt a single local encrypted-header blob and name it by content. |
 | `tcl-fw devices [--detect]` | List known devices, or probe for a connected phone. |
+| `tcl-fw templates [--all]` | List validated firmware templates with a **NEW** tag on recent builds (`--all` shows full release history). |
+| `tcl-fw sync` | Pull newly-recorded devices from the community server into your device list. |
+| `tcl-fw sharing [--on\|--off]` | Show or change community device-ID sharing (opt-out, nothing personal). |
+
+## Community device database (opt-out)
+
+`tcl-fw` can only auto-fill a device it knows about, so it grows its own list.
+When a lookup succeeds, the tool reports the device identifiers it used to a
+small community registry; other installs pull those in, so a device one person
+discovers becomes auto-detectable for everyone.
+
+- **Shared:** curef, firmware version (fv), mode, resolved tv/fw_id, package
+  size, TCL software version (SVN), and the tool version.
+- **Never shared:** no IMEI (the FOTA protocol uses a fixed placeholder), no IP,
+  no account — nothing that identifies you or your specific handset.
+- **Opt-out, disclosed on first run.** Turn it off any time:
+
+  ```bash
+  tcl-fw sharing --off      # stop sharing;  --on to resume
+  tcl-fw sharing            # status + exactly what's recorded
+  ```
+
+  The desktop app shows the same notice once and a checkbox at the bottom of the
+  window. Submissions are fire-and-forget: if the server is unreachable the tool
+  proceeds normally and simply skips the record.
+
+The device list refreshes automatically (once a day, in the background, gated on
+the same opt-out); `tcl-fw sync` pulls it on demand. The registry is public —
+browse what's recorded at the server's `/about` and `/api/curefs`. Server code
+and privacy details live in [`curef-server/`](curef-server/).
 
 ## How it works
 

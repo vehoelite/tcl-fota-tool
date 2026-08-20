@@ -15,7 +15,9 @@ Only device identifiers — nothing personal:
 | `fv` | `AXAMWTM0` | firmware version (optional — omitted for curef-only lookups) |
 | `mode` | `4` | 2 = OTA, 4 = FULL |
 | `tv`, `fw_id` | `AXAMWTM0`, `983299` | resolved target build |
-| `tool_version` | `3.2.1` | which client reported it |
+| `size` | `9663676416` | total package size in bytes (optional) |
+| `svn` | `v9.0.AXAM` | TCL software version (optional) |
+| `tool_version` | `3.5.0` | which client reported it |
 | `count`, `first_seen`, `last_seen` | | aggregation |
 
 **Not** stored: IMEI (the FOTA protocol uses a fixed placeholder), IP addresses,
