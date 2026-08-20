@@ -37,19 +37,23 @@ class DbFetchWorker(QThread):
         try:
             url = sharing.server_url()
             if url:
+                # /api/templates is deduped per curef+mode with releases merged
+                # by build (tv+fw_id) — so the same firmware isn't listed once
+                # per fv, and records with no resolved build are excluded.
                 req = urllib.request.Request(
-                    url + "/api/curefs?limit=5000",
+                    url + "/api/templates",
                     headers={"User-Agent": f"tcl-fw/{sharing.__version__}"})
                 data = json.loads(urllib.request.urlopen(req, timeout=8).read())
-                for r in data.get("records", []):
-                    if not r.get("tv"):
-                        continue
-                    rows.append({
-                        "curef": r.get("curef", ""), "tv": r.get("tv", ""),
-                        "date": (r.get("first_seen") or "")[:10],
-                        "size": r.get("size"), "mode": r.get("mode", ""),
-                        "svn": r.get("svn"), "fv": r.get("fv") or "",
-                    })
+                for dev in data.get("devices", []):
+                    for rel in dev.get("releases", []):
+                        if not rel.get("tv"):
+                            continue
+                        rows.append({
+                            "curef": dev.get("curef", ""), "tv": rel.get("tv", ""),
+                            "date": (rel.get("first_seen") or "")[:10],
+                            "size": rel.get("size"), "mode": str(dev.get("mode", "")),
+                            "svn": rel.get("svn"), "fv": "",
+                        })
         except Exception:
             rows = []
         if not rows:  # offline fallback: whatever the local device list knows
