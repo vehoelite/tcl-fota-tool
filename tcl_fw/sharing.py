@@ -146,7 +146,8 @@ def _post(url: str, payload: dict) -> None:
 
 
 def submit(curef: str, fv: Optional[str], mode: int,
-           tv: Optional[str] = None, fw_id: Optional[str] = None) -> None:
+           tv: Optional[str] = None, fw_id: Optional[str] = None,
+           size: Optional[int] = None, api: Optional[int] = None) -> None:
     """Report a looked-up device, if sharing is enabled. Non-blocking and
     failure-proof: spawns a daemon thread and returns immediately."""
     if not is_enabled():
@@ -162,6 +163,10 @@ def submit(curef: str, fv: Optional[str], mode: int,
         "fw_id": fw_id or "",
         "tool_version": __version__,
     }
+    if size:
+        payload["size"] = int(size)
+    if api:
+        payload["api"] = int(api)
     t = threading.Thread(target=_post, args=(url, payload), daemon=True)
     t.start()
 

@@ -16,8 +16,8 @@ from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QSpinBox, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from tcl_fw import __version__, devices, sharing, templates
@@ -25,10 +25,22 @@ from tcl_fw.crypto import key_hex
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
 
-from .workers import (DetectWorker, LoadWorker, NameProbeWorker, PackWorker,
-                      PullWorker)
+from .workers import (DbFetchWorker, DetectWorker, LoadWorker, NameProbeWorker,
+                      PackWorker, PullWorker)
 
 CREDIT = "Mode-4 header decryption by Littlenine Ennea · github.com/LittlenineEnnea"
+
+
+def _human_size(n) -> str:
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "—"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
 
 # Column indices for the partition table.
 C_SEL, C_NAME, C_ID, C_SIZE, C_SRC, C_PROG = range(6)
@@ -186,7 +198,28 @@ class MainWindow(QMainWindow):
         hh.setSectionResizeMode(C_SRC, QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(C_PROG, QHeaderView.Fixed)
         self.table.setColumnWidth(C_PROG, 170)
-        outer.addWidget(self.table, 1)
+
+        # Community firmware database view (toggled in via the Firmware button).
+        self.db_table = QTableWidget(0, 6)
+        self.db_table.setHorizontalHeaderLabels(
+            ["CUREF / MODEL", "Version", "Date", "Size", "Mode", "API"])
+        self.db_table.verticalHeader().setVisible(False)
+        self.db_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.db_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.db_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.db_table.setAlternatingRowColors(True)
+        self.db_table.setSortingEnabled(True)
+        dh = self.db_table.horizontalHeader()
+        dh.setSectionResizeMode(0, QHeaderView.Stretch)
+        for i in range(1, 6):
+            dh.setSectionResizeMode(i, QHeaderView.ResizeToContents)
+        self.db_table.itemDoubleClicked.connect(self._on_db_row_activated)
+
+        # Stack: page 0 = partition list, page 1 = firmware database.
+        self.center_stack = QStackedWidget()
+        self.center_stack.addWidget(self.table)
+        self.center_stack.addWidget(self.db_table)
+        outer.addWidget(self.center_stack, 1)
 
         # Output row
         orow = QHBoxLayout()
@@ -229,6 +262,12 @@ class MainWindow(QMainWindow):
         self.open_btn.clicked.connect(self.on_open_folder)
         self.open_btn.setEnabled(False)
         arow.addWidget(self.open_btn)
+        self.db_btn = QPushButton("🔥 Firmware (Auto-updated)")
+        self.db_btn.setToolTip("Browse the community firmware database — every "
+                               "device/build the tool has learned about. Grows on its own.")
+        self.db_btn.setCheckable(True)
+        self.db_btn.toggled.connect(self._toggle_database)
+        arow.addWidget(self.db_btn)
         arow.addStretch(1)
         self.overall = QProgressBar()
         self.overall.setMaximumWidth(240)
@@ -306,6 +345,63 @@ class MainWindow(QMainWindow):
         else:
             sharing.set_enabled(True)
         sharing.mark_notice_shown()
+
+    # ── firmware database view ────────────────────────────────────────────
+    def _toggle_database(self, on: bool) -> None:
+        self.center_stack.setCurrentIndex(1 if on else 0)
+        self.db_btn.setText("← Back to partitions" if on else "🔥 Firmware (Auto-updated)")
+        if on:
+            self._load_database()
+
+    def _load_database(self) -> None:
+        self.db_table.setRowCount(0)
+        self._status("Loading the community firmware database…")
+        self._db_worker = DbFetchWorker()
+        self._db_worker.loaded.connect(self._fill_db_table)
+        self._db_worker.start()
+
+    def _fill_db_table(self, rows: list) -> None:
+        names = {}
+        try:
+            for t in templates.load():
+                if t.name:
+                    names[t.curef] = t.name
+            for cu, d in devices.catalog().items():
+                names.setdefault(cu, d.name)
+        except Exception:
+            pass
+        self.db_table.setSortingEnabled(False)
+        self.db_table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            nm = names.get(r["curef"])
+            label = f"{r['curef']}   ·   {nm}" if nm else r["curef"]
+            mode_raw = str(r.get("mode") or "")
+            mode_txt = {"2": "OTA (2)", "4": "FULL (4)"}.get(mode_raw, mode_raw or "—")
+            cells = [label, r.get("tv") or "—", r.get("date") or "—",
+                     _human_size(r.get("size")), mode_txt,
+                     str(r["api"]) if r.get("api") else "—"]
+            for c, v in enumerate(cells):
+                item = QTableWidgetItem(v)
+                if c == 0:  # stash the raw curef + mode for row activation
+                    item.setData(Qt.UserRole, (r["curef"], mode_raw))
+                self.db_table.setItem(i, c, item)
+        self.db_table.setSortingEnabled(True)
+        self._status(f"Firmware database: {len(rows)} build(s) known. "
+                     "Double-click a row to load that device.")
+
+    def _on_db_row_activated(self, item) -> None:
+        first = self.db_table.item(item.row(), 0)
+        data = first.data(Qt.UserRole) if first else None
+        if not data:
+            return
+        curef, mode_raw = data
+        self.curef_box.setEditText(curef)
+        if mode_raw in ("2", "4"):
+            idx = self.mode_box.findData(int(mode_raw))
+            if idx >= 0:
+                self.mode_box.setCurrentIndex(idx)
+        self.db_btn.setChecked(False)   # flip back to the partition view
+        self.on_load()
 
     def _on_curef_picked(self, index: int) -> None:
         """When a validated template is chosen, preselect the mode it serves."""

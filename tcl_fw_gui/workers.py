@@ -20,9 +20,50 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from tcl_fw import adb, devices, flashpack, fota, puller, sharing
+from tcl_fw import adb, devices, flashpack, fota, puller, sharing, templates
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
+
+
+class DbFetchWorker(QThread):
+    """Fetch the community firmware database (server, with a local fallback)."""
+
+    loaded = Signal(list)   # list[dict]: curef, tv, date, size, mode, api, fv
+
+    def run(self) -> None:
+        import json
+        import urllib.request
+        rows: list[dict] = []
+        try:
+            url = sharing.server_url()
+            if url:
+                req = urllib.request.Request(
+                    url + "/api/curefs?limit=5000",
+                    headers={"User-Agent": f"tcl-fw/{sharing.__version__}"})
+                data = json.loads(urllib.request.urlopen(req, timeout=8).read())
+                for r in data.get("records", []):
+                    if not r.get("tv"):
+                        continue
+                    rows.append({
+                        "curef": r.get("curef", ""), "tv": r.get("tv", ""),
+                        "date": (r.get("first_seen") or "")[:10],
+                        "size": r.get("size"), "mode": r.get("mode", ""),
+                        "api": r.get("api"), "fv": r.get("fv") or "",
+                    })
+        except Exception:
+            rows = []
+        if not rows:  # offline fallback: whatever the local device list knows
+            try:
+                for t in templates.load():
+                    for rel in t.releases:
+                        rows.append({
+                            "curef": t.curef, "tv": rel.tv,
+                            "date": (rel.first_seen or "")[:10],
+                            "size": None, "mode": str(t.mode), "api": None, "fv": "",
+                        })
+            except Exception:
+                pass
+        self.loaded.emit(rows)
 
 
 class DetectWorker(QThread):
@@ -110,12 +151,13 @@ class LoadWorker(QThread):
                         "may be wrong.")
                 return
 
-            sharing.submit(curef, None if self._fv == "000000" else self._fv,
-                           self._mode, tv, fw_id)
             self.status.emit("Requesting fileset…")
             info: DownloadInfo = fota.request_download(
                 curef, tv, fw_id, mode=self._mode,
                 fv=self._fv if self._fv != "000000" else "AAA000")
+            sharing.submit(curef, None if self._fv == "000000" else self._fv,
+                           self._mode, tv, fw_id,
+                           size=sum(f.size for f in info.files))
             if not info.files:
                 self.failed.emit("Server returned an empty fileset.")
                 return

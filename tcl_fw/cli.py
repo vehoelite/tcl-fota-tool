@@ -147,8 +147,8 @@ def list_cmd(
     curef, _, fvh = _auto_curef(curef)
     fvh = fv or fvh
     curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
-    sharing.submit(curef, fvh, mode, tv, fw_id)
     info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
+    sharing.submit(curef, fvh, mode, tv, fw_id, size=sum(f.size for f in info.files))
 
     known = devices.lookup(curef)
     console.print(f"\n[bold]{curef}[/]  {known.name if known else ''}")
@@ -198,8 +198,8 @@ def pull(
     curef, _, fvh = _auto_curef(curef)
     fvh = fv or fvh
     curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
-    sharing.submit(curef, fvh, mode, tv, fw_id)
     info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
+    sharing.submit(curef, fvh, mode, tv, fw_id, size=sum(f.size for f in info.files))
 
     out = outdir or f"pkg_{curef.replace('/', '_')}"
     os.makedirs(out, exist_ok=True)
