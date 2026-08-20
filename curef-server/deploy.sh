@@ -16,6 +16,7 @@ id tclcuref >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sb
 
 mkdir -p "$APP_DIR" "$DATA_DIR"
 install -o tclcuref -g tclcuref -m 644 /tmp/tcl-curef-server.js "$APP_DIR/server.js"
+install -o tclcuref -g tclcuref -m 644 /tmp/tcl-curef-fota.js "$APP_DIR/fota.js"
 chown -R tclcuref:tclcuref "$DATA_DIR"; chmod 750 "$DATA_DIR"
 
 cat > "$ENV_FILE" <<EOF

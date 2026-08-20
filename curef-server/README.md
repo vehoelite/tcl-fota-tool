@@ -27,7 +27,8 @@ accounts, names, or locations. Reads are public so anyone can audit what's held.
 
 | method | path | auth | purpose |
 |--------|------|------|---------|
-| POST | `/api/curef` | `x-tcl-key` header | record a `{curef, fv, mode, tv, fw_id, tool_version}` |
+| POST | `/api/curef` | `x-tcl-key` header | record a `{curef, fv, mode, tv, fw_id, size, svn, tool_version}` |
+| POST | `/api/revalidate` | `x-tcl-key` header | trigger a re-validation pass now (runs in background) |
 | GET | `/api/curefs?limit=&offset=` | public | list records (newest first) |
 | GET | `/api/templates` | public | validated records reshaped as per-device release history — the feed `tcl-fw sync` merges to auto-grow its device list |
 | GET | `/api/stats` | public | `{devices, combos, total, updated}` |
@@ -47,6 +48,19 @@ open-source client, so it is not a secret.
 | `DATA_DIR` | `./data` | `curefs.json` (aggregate) + `events.jsonl` (raw log) |
 | `TCL_CUREF_KEY` | — | required for writes |
 | `FLUSH_MS` | `2000` | debounce for the aggregate flush |
+| `REVALIDATE_MS` | `43200000` (12h) | how often to re-check known curefs against TCL; `0` disables |
+
+## Self-updating (re-validation)
+
+Every `REVALIDATE_MS` (default 12h, first run ~60s after start), the server
+re-checks each known curef against TCL's `check_new.php` and records the current
+build — so a **new firmware release grows the history on its own**, without
+waiting for a user to look the device up. Because the client only submits after
+a real resolve, and revalidation talks straight to TCL, every stored build is
+validated. New builds are keyed by their `tv`, so history accumulates rather
+than overwriting; `size` and `svn` get filled in for records that lacked them.
+`fota.js` implements the minimal signed check. Force a pass any time with
+`POST /api/revalidate`.
 
 ## Deployment (the beast)
 

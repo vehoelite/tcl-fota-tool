@@ -105,8 +105,13 @@ discovers becomes auto-detectable for everyone.
 
 The device list refreshes automatically (once a day, in the background, gated on
 the same opt-out); `tcl-fw sync` pulls it on demand. The registry is public —
-browse what's recorded at the server's `/about` and `/api/curefs`. Server code
-and privacy details live in [`curef-server/`](curef-server/).
+browse what's recorded at the server's `/about` and `/api/curefs`.
+
+The server also **re-validates itself**: every ~12h it re-checks each known
+device against TCL and records the current build, so **new firmware releases
+grow the history on their own** — even for a device nobody's looked up lately.
+Server code, the self-updating logic, and privacy details live in
+[`curef-server/`](curef-server/).
 
 ## How it works
 
