@@ -202,7 +202,7 @@ class MainWindow(QMainWindow):
         # Community firmware database view (toggled in via the Firmware button).
         self.db_table = QTableWidget(0, 6)
         self.db_table.setHorizontalHeaderLabels(
-            ["CUREF / MODEL", "Version", "Date", "Size", "Mode", "API"])
+            ["CUREF / MODEL", "Version", "Date", "Size", "Mode", "SW ver"])
         self.db_table.verticalHeader().setVisible(False)
         self.db_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.db_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -379,7 +379,7 @@ class MainWindow(QMainWindow):
             mode_txt = {"2": "OTA (2)", "4": "FULL (4)"}.get(mode_raw, mode_raw or "—")
             cells = [label, r.get("tv") or "—", r.get("date") or "—",
                      _human_size(r.get("size")), mode_txt,
-                     str(r["api"]) if r.get("api") else "—"]
+                     r.get("svn") or "—"]
             for c, v in enumerate(cells):
                 item = QTableWidgetItem(v)
                 if c == 0:  # stash the raw curef + mode for row activation

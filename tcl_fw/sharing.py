@@ -23,7 +23,7 @@ import os
 import threading
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import __version__
 
@@ -147,9 +147,13 @@ def _post(url: str, payload: dict) -> None:
 
 def submit(curef: str, fv: Optional[str], mode: int,
            tv: Optional[str] = None, fw_id: Optional[str] = None,
-           size: Optional[int] = None, api: Optional[int] = None) -> None:
+           size: Optional[int] = None,
+           svn_fn: Optional[Callable[[], Optional[str]]] = None) -> None:
     """Report a looked-up device, if sharing is enabled. Non-blocking and
-    failure-proof: spawns a daemon thread and returns immediately."""
+    failure-proof: spawns a daemon thread and returns immediately.
+
+    svn_fn, if given, is called *inside* the background thread to fetch the SVN
+    (TCL software version) — so that extra check never blocks the tool."""
     if not is_enabled():
         return
     url = server_url()
@@ -165,10 +169,18 @@ def submit(curef: str, fv: Optional[str], mode: int,
     }
     if size:
         payload["size"] = int(size)
-    if api:
-        payload["api"] = int(api)
-    t = threading.Thread(target=_post, args=(url, payload), daemon=True)
-    t.start()
+
+    def _worker():
+        if svn_fn:
+            try:
+                svn = svn_fn()
+                if svn:
+                    payload["svn"] = svn
+            except Exception:
+                pass
+        _post(url, payload)
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def status_text() -> str:

@@ -48,7 +48,7 @@ class DbFetchWorker(QThread):
                         "curef": r.get("curef", ""), "tv": r.get("tv", ""),
                         "date": (r.get("first_seen") or "")[:10],
                         "size": r.get("size"), "mode": r.get("mode", ""),
-                        "api": r.get("api"), "fv": r.get("fv") or "",
+                        "svn": r.get("svn"), "fv": r.get("fv") or "",
                     })
         except Exception:
             rows = []
@@ -59,7 +59,7 @@ class DbFetchWorker(QThread):
                         rows.append({
                             "curef": t.curef, "tv": rel.tv,
                             "date": (rel.first_seen or "")[:10],
-                            "size": None, "mode": str(t.mode), "api": None, "fv": "",
+                            "size": None, "mode": str(t.mode), "svn": None, "fv": "",
                         })
             except Exception:
                 pass
@@ -155,9 +155,10 @@ class LoadWorker(QThread):
             info: DownloadInfo = fota.request_download(
                 curef, tv, fw_id, mode=self._mode,
                 fv=self._fv if self._fv != "000000" else "AAA000")
-            sharing.submit(curef, None if self._fv == "000000" else self._fv,
-                           self._mode, tv, fw_id,
-                           size=sum(f.size for f in info.files))
+            fv_used = None if self._fv == "000000" else self._fv
+            sharing.submit(curef, fv_used, self._mode, tv, fw_id,
+                           size=sum(f.size for f in info.files),
+                           svn_fn=lambda: fota.check_svn(curef, self._mode, self._fv))
             if not info.files:
                 self.failed.emit("Server returned an empty fileset.")
                 return

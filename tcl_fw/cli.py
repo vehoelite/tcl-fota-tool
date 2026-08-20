@@ -148,7 +148,8 @@ def list_cmd(
     fvh = fv or fvh
     curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
     info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
-    sharing.submit(curef, fvh, mode, tv, fw_id, size=sum(f.size for f in info.files))
+    sharing.submit(curef, fvh, mode, tv, fw_id, size=sum(f.size for f in info.files),
+                   svn_fn=lambda: fota.check_svn(curef, mode, fvh or "000000"))
 
     known = devices.lookup(curef)
     console.print(f"\n[bold]{curef}[/]  {known.name if known else ''}")
@@ -199,7 +200,8 @@ def pull(
     fvh = fv or fvh
     curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
     info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
-    sharing.submit(curef, fvh, mode, tv, fw_id, size=sum(f.size for f in info.files))
+    sharing.submit(curef, fvh, mode, tv, fw_id, size=sum(f.size for f in info.files),
+                   svn_fn=lambda: fota.check_svn(curef, mode, fvh or "000000"))
 
     out = outdir or f"pkg_{curef.replace('/', '_')}"
     os.makedirs(out, exist_ok=True)

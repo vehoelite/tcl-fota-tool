@@ -110,6 +110,22 @@ def discover(curef: str, fv: str = "000000", mode: int = 4) -> tuple[Optional[st
         return None, None
 
 
+def check_svn(curef: str, mode: int = 4, fv: str = "000000") -> Optional[str]:
+    """The SVN (TCL software version, e.g. 'v9.0.AXAM') from a check — the only
+    place it's returned. Used only for the community 'SW ver' column; best-effort."""
+    pre = OrderedDict(
+        id="543212345000000", salt=salt(), curef=curef, fv=fv,
+        type="Firmware", mode=str(mode), cltp="10",
+    )
+    p = OrderedDict(pre)
+    p["vk"] = vk(pre, _NEW)
+    p["cktp"] = "2"; p["rtd"] = "1"; p["chnl"] = "2"; p["osvs"] = "15"; p["ckot"] = "2"
+    try:
+        return _post_xml("check_new.php", p, timeout=20).findtext(".//SVN") or None
+    except Exception:
+        return None
+
+
 def request_download(curef: str, tv: str, fw_id: str,
                      fv: str = "AAA000", mode: int = 4) -> DownloadInfo:
     """POST download_request.php -> slaves + the full FILE_LIST. foot=1 makes the
