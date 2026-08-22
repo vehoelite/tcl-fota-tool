@@ -171,7 +171,8 @@ def list_cmd(
         nm = plan.names.get(f.file_id)
         if not nm:
             nm = ("[in enc header]" if is_small
-                  else naming.magic_name(fota.body_head(info.slave, f.rel_url))[0])
+                  else naming.magic_name(fota.body_head(info.slave, f.rel_url,
+                                                        n=puller.NAME_HEAD_BYTES))[0])
         src = "[cyan]header[/]" if is_small else "body"
         size = "[dim]—[/]" if is_small else f"{bs:,}"
         table.add_row(nm, f.file_id, size, src)

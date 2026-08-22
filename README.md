@@ -134,22 +134,35 @@ handles both automatically:
   The header is padded with a constant filler block, which `tcl-fw` detects and
   trims to recover the exact image.
 
-Partitions are named **authoritatively** from the server: the `check_new.php`
-manifest is joined to the `.sca` scatter's `rename_prefix → file_name` map, so
-you get real names, not guesses. When the scatter is unavailable, images are
-identified by content (MTK GFH partition name, ext4 volume label, AVB/boot/dtbo
-magic).
+Partitions are named **authoritatively**, never guessed. In order of preference
+`tcl-fw` uses:
+
+1. **The `.sca` scatter** — the `check_new.php` manifest joined to the scatter's
+   `rename_prefix → file_name` map (real names like `lk.img`, `vbmeta.img`).
+2. **An embedded manifest** — some devices serve *no* top-level scatter but
+   bundle one inside a `target_files` zip. `tcl-fw` reads its `misc_info.txt`,
+   `scatter_emmc.txt`, and `ota_update_list.txt` to name filesystem partitions
+   by size (this is the scatter-first source TCL's own OTU engine relies on) and
+   drops those descriptors next to the images.
+3. **Content identification** — MTK GFH partition name, the **ext4 / f2fs /
+   erofs** superblock read *through* the Android sparse container (so a sparse
+   `vendor`/`cache`/`userdata` comes out named, not as an anonymous `sparse`),
+   AVB / boot / dtbo magic, and zip-wrapped payloads by their first entry.
 
 ## Output
 
 ```
 pkg_<curef>/
-  lk.img  boot.img  vbmeta.img  super.img  preloader_*.bin  …
-  <device>.sca            # the flash-tool scatter
-  manifest.json           # what was pulled, sizes, checksum results
+  lk.img  boot.img  vbmeta.img  vendor.img  cache.img  userdata.img  …
+  <device>.sca            # the flash-tool scatter (when the server serves one)
+  scatter_emmc.txt        # recovered partition layout (embedded-manifest devices)
+  misc_info.txt           # partition fs types + sizes (embedded-manifest devices)
+  manifest.json           # what was pulled, sizes, checksum results, manifest
 ```
 
-Feed these to SP Flash Tool, `fastboot`, or `mtkclient`.
+Feed these to SP Flash Tool, `fastboot`, or `mtkclient`. Filesystem partitions
+land as Android **sparse** images — flash them as-is, or expand to raw with
+`simg2img` when you want to mount and inspect.
 
 ## Make it flashable (`pack`)
 

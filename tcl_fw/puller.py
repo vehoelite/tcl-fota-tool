@@ -20,10 +20,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import fota, naming
+from . import fota, manifest as manifest_mod, naming
 from .crypto import decrypt_header
 from .download import fetch_checksums, sha1_file, stream_body
 from .fota import DownloadInfo, FileEntry
+
+# How much of a body to fetch for content-naming: enough to un-sparse block 0
+# (ext4/f2fs superblock at raw offset 1024) and read a zip's first entry.
+NAME_HEAD_BYTES = 1 << 16
 
 
 @dataclass
@@ -42,6 +46,7 @@ class PullPlan:
     info: DownloadInfo
     names: dict[str, str] = field(default_factory=dict)   # FILE_ID -> real name
     sizes: dict[str, int] = field(default_factory=dict)   # FILE_ID -> body size
+    manifest: Optional["manifest_mod.Manifest"] = None    # embedded target_files manifest
 
 
 # ── naming ──────────────────────────────────────────────────────────────────
@@ -78,6 +83,42 @@ def authoritative_names(curef: str, info: DownloadInfo,
 
 # ── planning ────────────────────────────────────────────────────────────────
 
+def _fetch_body(slave: str, rel: str, cap: int = 64 << 20) -> bytes:
+    """Fetch a whole body into memory (capped). Used only for the small
+    target_files zip; returns b'' on any error."""
+    try:
+        import urllib.request
+        req = urllib.request.Request("http://%s%s" % (slave, rel),
+                                     headers={"User-Agent": fota.USER_AGENT})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.read(cap)
+    except Exception:
+        return b""
+
+
+def load_embedded_manifest(info: DownloadInfo,
+                           sizes: dict[str, int]) -> Optional["manifest_mod.Manifest"]:
+    """Some devices serve no top-level .sca; instead the partition manifest is
+    bundled inside a downloaded ``target_files`` zip. Find that zip (a modest
+    body whose first zip entry is target_files_extract/…) and parse it."""
+    if not info.slave:
+        return None
+    for f in info.files:
+        bs = sizes.get(f.file_id, -1)
+        if bs <= 0 or bs > 64 * 1024 * 1024:          # only a real, modest body
+            continue
+        head = fota.body_head(info.slave, f.rel_url, n=64)
+        if head[:4] != b"PK\x03\x04":
+            continue
+        inner = naming._zip_first_entry(head) or ""
+        if not inner.startswith("target_files"):
+            continue
+        man = manifest_mod.from_zip_bytes(_fetch_body(info.slave, f.rel_url))
+        if man:
+            return man
+    return None
+
+
 def build_plan(curef: str, info: DownloadInfo,
                probe_workers: int = 16, mode: int = 4) -> PullPlan:
     """Probe every file's body size (parallel) and resolve authoritative names."""
@@ -90,7 +131,11 @@ def build_plan(curef: str, info: DownloadInfo,
     with ThreadPoolExecutor(max_workers=probe_workers) as ex:
         for fid, sz in ex.map(probe, info.files):
             sizes[fid] = sz
-    return PullPlan(info=info, names=names, sizes=sizes)
+
+    # No server-authoritative .sca? Fall back to the manifest the pack may embed
+    # in its target_files zip — the scatter-first source the OTU engine uses.
+    man = None if names else load_embedded_manifest(info, sizes)
+    return PullPlan(info=info, names=names, sizes=sizes, manifest=man)
 
 
 def _resolve_name(plan: PullPlan, f: FileEntry, is_small: bool) -> Optional[str]:
@@ -106,8 +151,19 @@ def _resolve_name(plan: PullPlan, f: FileEntry, is_small: bool) -> Optional[str]
             return None
         n, e = naming.magic_name(decrypt_header(enc))
         return "%s_%s.%s" % (n, f.file_id, e)
-    head = fota.body_head(plan.info.slave, f.rel_url) if plan.info.slave else b""
+    # 64 KiB is enough to un-sparse block 0 (the ext4/f2fs superblock sits at raw
+    # offset 1024) and to read a zip's first entry name, so sparse partitions get
+    # their real label (vendor/cache/userdata) instead of an anonymous "sparse".
+    head = fota.body_head(plan.info.slave, f.rel_url, n=NAME_HEAD_BYTES) if plan.info.slave else b""
     n, e = naming.magic_name(head)
+    # If the pack embedded a manifest, let it authoritatively name a filesystem
+    # partition by its raw size — this catches a blank ext4 label (tctpersist)
+    # and confirms the label-read ones.
+    if plan.manifest and naming.is_filesystem(head):
+        raw = naming.sparse_raw_size(head) or plan.sizes.get(f.file_id, -1)
+        mn = plan.manifest.name_for_size(raw) if raw and raw > 0 else None
+        if mn:
+            n = naming.alias(mn)
     return "%s_%s.%s" % (n, f.file_id, e)
 
 
@@ -151,7 +207,7 @@ def write_manifest(curef: str, plan: PullPlan, results: list[PartResult],
     info = plan.info
     doc = {
         "curef": curef, "tv": info.tv, "fw_id": info.fw_id,
-        "generated_by": "tcl-fw 3.0",
+        "generated_by": "tcl-fw 4.0",
         "credit": "header decryption by Littlenine Ennea (github.com/LittlenineEnnea)",
         "slave": info.slave, "encslave": info.encslave,
         "files": [
@@ -160,6 +216,20 @@ def write_manifest(curef: str, plan: PullPlan, results: list[PartResult],
             for r in results
         ],
     }
+    # If the pack embedded a partition manifest, record it and drop the raw
+    # descriptors next to the images so they're available for flashing/naming.
+    if plan.manifest:
+        doc["embedded_manifest"] = {
+            "partition_sizes": plan.manifest.sizes,
+            "fs_types": plan.manifest.fs_types,
+            "descriptors": sorted(plan.manifest.files),
+        }
+        for fname, text in plan.manifest.files.items():
+            try:
+                with open(os.path.join(outdir, fname), "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            except Exception:
+                pass
     path = os.path.join(outdir, "manifest.json")
     with open(path, "w") as fh:
         json.dump(doc, fh, indent=2)

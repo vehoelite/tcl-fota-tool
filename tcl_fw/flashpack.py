@@ -136,7 +136,8 @@ def _part_is_fs(p: MtkPart) -> bool:
 
 
 def _probe_is_fs(prb: "Probe") -> bool:
-    return prb.family in ("ext4", "erofs") or prb.cname.startswith("sparse")
+    return prb.family in ("ext4", "erofs", "f2fs", "sparse") \
+        or prb.cname.startswith("sparse")
 
 
 # Slack for an image that decrypts a few bytes larger than its nominal

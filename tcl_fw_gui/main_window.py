@@ -73,6 +73,9 @@ class MainWindow(QMainWindow):
         # when the curef in the box still matches what we detected.
         self._detected_curef: Optional[str] = None
         self._detected_fv: Optional[str] = None
+        # The last Output value we filled in automatically. Lets us refresh it to
+        # match a newly-loaded device while leaving a path the user typed alone.
+        self._auto_outdir: str = ""
         self._detect_worker: Optional[DetectWorker] = None
         self._pull_worker: Optional[PullWorker] = None
         self._name_worker: Optional[NameProbeWorker] = None
@@ -497,8 +500,15 @@ class MainWindow(QMainWindow):
             f"{curef}   tv={info.tv}  fw_id={info.fw_id}   ·   "
             f"{len(info.files)} parts ({small} small / {len(info.files)-small} body)"
             + (f"   ·   {known.name}" if known and known.name else ""))
-        if not self.out_edit.text().strip():
-            self.out_edit.setText(f"pkg_{curef.replace('/', '_')}")
+        # Keep Output pointed at the device being loaded. Refresh it when it's
+        # empty or still holds a name we chose — but never clobber a path the
+        # user typed themselves. (Without this, loading a second device left the
+        # first device's folder in the box, so its files landed in the wrong pkg.)
+        cur = self.out_edit.text().strip()
+        if not cur or cur == self._auto_outdir:
+            auto = f"pkg_{curef.replace('/', '_')}"
+            self.out_edit.setText(auto)
+            self._auto_outdir = auto
 
         # Populate, largest body first (small parts sink to the bottom).
         ordered = sorted(info.files, key=lambda x: -(plan.sizes.get(x.file_id, -1)))

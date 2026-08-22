@@ -14,6 +14,7 @@ Ported from Littlenine Ennea's tcl-fw.py.
 
 from __future__ import annotations
 
+import os
 import re
 import struct
 from dataclasses import dataclass
@@ -43,9 +44,110 @@ class Identity:
     confidence: float
 
 
+SPARSE_MAGIC = b"\x3a\xff\x26\xed"
+
+
+def unsparse_head(d: bytes, want: int = 1 << 16) -> bytes:
+    """Materialize up to `want` bytes of the RAW image from an Android sparse
+    buffer. Non-sparse input is returned unchanged. Bounded: a don't-care / fill
+    chunk that nominally spans gigabytes only contributes up to `want` bytes, so
+    this never blows up on a userdata-sized sparse header."""
+    if d[:4] != SPARSE_MAGIC:
+        return d
+    try:
+        (magic, vmaj, vmin, fhdr, chdr, blk, tb, tc, crc) = struct.unpack_from(
+            "<IHHHHIIII", d, 0)
+        pos, out = fhdr, bytearray()
+        for _ in range(tc):
+            if pos + 12 > len(d) or len(out) >= want:
+                break
+            ct, _r, csz, tsz = struct.unpack_from("<HHII", d, pos)
+            pos += 12
+            span = csz * blk                       # raw bytes this chunk expands to
+            need = want - len(out)
+            if ct == 0xCAC1:                       # raw
+                take = min(tsz - chdr, need)
+                out += d[pos:pos + take]; pos += tsz - chdr
+            elif ct == 0xCAC2:                     # fill
+                fill = d[pos:pos + 4] or b"\x00"; pos += 4
+                out += (fill * ((min(span, need) // 4) + 1))[:min(span, need)]
+            elif ct == 0xCAC3:                     # don't care -> zeros
+                out += b"\x00" * min(span, need)
+            elif ct == 0xCAC4:                     # crc32
+                pos += 4
+        return bytes(out[:want])
+    except Exception:
+        return d
+
+
+def sparse_raw_size(head: bytes) -> Optional[int]:
+    """The un-sparsed (raw) byte size of an Android sparse image, from its
+    28-byte header alone (total_blocks * block_size). None if not sparse."""
+    if head[:4] != SPARSE_MAGIC or len(head) < 28:
+        return None
+    try:
+        _m, _vj, _vn, _fh, _ch, blk, tblk, _tc, _crc = struct.unpack_from(
+            "<IHHHHIIII", head, 0)
+        return blk * tblk
+    except Exception:
+        return None
+
+
+def is_filesystem(head: bytes) -> bool:
+    """True if `head` is (or wraps) a mountable filesystem image — a sparse
+    container, or a raw ext4/f2fs/erofs superblock."""
+    if head[:4] == SPARSE_MAGIC:
+        return True
+    raw = head
+    if len(raw) >= 0x43a and raw[0x438:0x43a] == b"\x53\xef":
+        return True
+    if len(raw) >= 0x404 and raw[0x400:0x404] in (b"\x10\x20\xf5\xf2",
+                                                  b"\xe2\xe1\xf5\xe0"):
+        return True
+    return False
+
+
+def fs_label(raw: bytes) -> Optional[tuple[str, str]]:
+    """(name, family) from a RAW (already un-sparsed) filesystem head, or None.
+    ext4/erofs self-report a volume label; f2fs has no label but is, on these
+    MTK devices, always userdata."""
+    if len(raw) >= 0x43a and raw[0x438:0x43a] == b"\x53\xef":            # ext4
+        lab = raw[0x478:0x488].split(b"\x00")[0].decode("latin1", "replace")
+        lab = lab.rsplit("/", 1)[-1]               # "/mnt/vendor/otap" -> "otap"
+        return (lab, "ext4") if lab else ("ext4", "ext4")
+    if len(raw) >= 0x404 and raw[0x400:0x404] == b"\x10\x20\xf5\xf2":    # f2fs
+        return ("userdata", "f2fs")
+    if len(raw) >= 0x450 and raw[0x400:0x404] == b"\xe2\xe1\xf5\xe0":    # erofs
+        lab = raw[0x440:0x450].split(b"\x00")[0].decode("latin1", "replace")
+        return (lab, "erofs") if lab else ("erofs", "erofs")
+    return None
+
+
+def ext4_label(d: bytes) -> Optional[str]:
+    """Volume label from a (possibly sparse) ext4 image. Kept for callers that
+    only care about ext4; new code should prefer fs_label(unsparse_head(d))."""
+    hit = fs_label(unsparse_head(d))
+    if hit and hit[1] == "ext4" and hit[0] != "ext4":
+        return hit[0]
+    return None
+
+
+def _zip_first_entry(b: bytes) -> Optional[str]:
+    """Name of the first local file inside a ZIP, read from its front (the
+    central directory sits at the end, so this works on a truncated head)."""
+    if b[:4] != b"PK\x03\x04" or len(b) < 30:
+        return None
+    try:
+        nlen = struct.unpack_from("<H", b, 26)[0]
+        return b[30:30 + nlen].decode("latin1", "replace") or None
+    except Exception:
+        return None
+
+
 def magic_name(b: bytes) -> tuple[str, str]:
     """(name, ext) from the first bytes of an image — works for a decrypted
-    header or a body head."""
+    header or a body head. Sparse- and zip-aware: it un-sparses far enough to
+    read an ext4/f2fs/erofs identity, and peeks inside a zip-wrapped payload."""
     if b[:4] == b"\x88\x16\x88\x58":
         nm = b[8:24].split(b"\x00")[0].decode("latin1", "replace")
         return (nm or "gfh"), "img"
@@ -53,8 +155,18 @@ def magic_name(b: bytes) -> tuple[str, str]:
         return "vbmeta", "img"
     if b[:4] == b"ANDR" or b[:8] == b"ANDROID!":
         return "boot_or_vendorboot", "img"
-    if b[:4] == b"\x3a\xff\x26\xed":
-        return "sparse", "img"
+    if b[:4] == SPARSE_MAGIC:
+        hit = fs_label(unsparse_head(b))
+        return (alias(hit[0]) if hit else "sparse"), "img"
+    if b[:4] == b"PK\x03\x04":
+        inner = _zip_first_entry(b) or ""
+        low = inner.lower()
+        if low.startswith("target_files") or low.endswith((".p", "updater")):
+            return "ota_recovery", "zip"
+        if low.endswith(".map"):
+            return os.path.splitext(os.path.basename(inner))[0] + "_map", "zip"
+        stem = os.path.splitext(os.path.basename(inner))[0]
+        return ("zip_" + stem if stem else "zip"), "zip"
     if b[:4] == b"\x4d\x4d\x4d\x01":
         return "mtk_mmm", "img"
     if b[:5] == b"<?xml":
@@ -64,33 +176,6 @@ def magic_name(b: bytes) -> tuple[str, str]:
     if b[:8] == b"\x00" * 8:
         return "zero", "img"
     return "part_%s" % b[:4].hex(), "bin"
-
-
-def ext4_label(d: bytes) -> Optional[str]:
-    """Volume label from a sparse ext4 image (self-identifies system/vendor/...)."""
-    if d[:4] != b"\x3a\xff\x26\xed":
-        return None
-    try:
-        (magic, vmaj, vmin, fhdr, chdr, blk, tb, tc, crc) = struct.unpack_from(
-            "<IHHHHIIII", d, 0)
-        pos, out = fhdr, b""
-        for _ in range(tc):
-            if pos + 12 > len(d):
-                break
-            ct, _r, csz, tsz = struct.unpack_from("<HHII", d, pos)
-            pos += 12
-            if ct == 0xCAC1:
-                out += d[pos:pos + csz * blk]; pos += csz * blk
-            elif ct == 0xCAC2:
-                pos += 4
-            if len(out) >= 0x500:
-                break
-        if len(out) >= 0x490 and out[0x438:0x43a] == b"\x53\xef":
-            lab = out[0x478:0x488].split(b"\x00")[0].decode("latin1", "replace")
-            return lab.rsplit("/", 1)[-1] or lab      # "/mnt/vendor/otap" -> "otap"
-    except Exception:
-        pass
-    return None
 
 
 def identify(data: bytes, size: int) -> Identity:
@@ -109,9 +194,13 @@ def identify(data: bytes, size: int) -> Identity:
         return Identity("dtbo", size, "dtbo", 1.0)
     if d[:4] == b"\x4d\x4d\x4d\x01":
         return Identity("preloader", size, "mmm", 1.0)
-    if d[:4] == b"\x3a\xff\x26\xed":
-        lab = ext4_label(d)
-        return Identity(alias(lab) if lab else "sparse", size, "ext4", 0.9 if lab else 0.3)
+    if d[:4] == SPARSE_MAGIC:
+        hit = fs_label(unsparse_head(d))
+        if hit:
+            name, fam = hit
+            named = name not in ("ext4", "erofs")   # a real label, not just the fs
+            return Identity(alias(name), size, fam, 0.9 if named else 0.4)
+        return Identity("sparse", size, "sparse", 0.3)
     if d[:5] == b"<?xml":
         return Identity("scatter", size, "xml", 1.0)
     if d[:8] == b"\x00" * 8:
