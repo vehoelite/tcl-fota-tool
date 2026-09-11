@@ -110,6 +110,25 @@ def read_device(serial: str) -> Device:
     return Device(serial=serial, curef=curef, fv=fv, model=model, name=name)
 
 
+def match(curef: str) -> Optional[Device]:
+    """The connected phone whose curef matches (ignoring a trailing -V), or None.
+    Used to pull the real fv and the device's model name without the user typing
+    anything."""
+    if not available():
+        return None
+    want = (curef or "").lower().removesuffix("-v")
+    if not want:
+        return None
+    try:
+        for serial in list_serials():
+            dev = read_device(serial)
+            if dev.curef and dev.curef.lower().removesuffix("-v") == want:
+                return dev
+    except Exception:
+        pass
+    return None
+
+
 def detect() -> Optional[Device]:
     """Return the first connected device's identity, or None if nothing usable."""
     serials = list_serials()

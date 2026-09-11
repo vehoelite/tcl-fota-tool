@@ -89,9 +89,16 @@ small community registry; other installs pull those in, so a device one person
 discovers becomes auto-detectable for everyone.
 
 - **Shared:** curef, firmware version (fv), mode, resolved tv/fw_id, package
-  size, TCL software version (SVN), and the tool version.
-- **Never shared:** no IMEI (the FOTA protocol uses a fixed placeholder), no IP,
-  no account — nothing that identifies you or your specific handset.
+  size, TCL software version (SVN), the **device model name**, and the tool
+  version. The model name comes from a read-only build property
+  (`ro.tct.setupwizard.marketname`, else `ro.product.model`) — it is identical
+  on every unit of that model, so it names the *model*, never your phone. It is
+  only sent when a matching handset is plugged in; otherwise it is simply
+  omitted.
+- **Never shared:** no IMEI or serial (the FOTA protocol uses a fixed
+  placeholder), no IP, no account, no personal name, no location, and no
+  user-set device nickname — nothing that identifies you or your specific
+  handset.
 - **Opt-out, disclosed on first run.** Turn it off any time:
 
   ```bash
@@ -104,8 +111,10 @@ discovers becomes auto-detectable for everyone.
   proceeds normally and simply skips the record.
 
 The device list refreshes automatically (once a day, in the background, gated on
-the same opt-out); `tcl-fw sync` pulls it on demand. The registry is public —
-browse what's recorded at the server's `/about` and `/api/curefs`.
+the same opt-out); `tcl-fw sync` pulls it on demand. Everything it learns shows
+up in **`tcl-fw devices`**, which marks each entry `built-in`, `bundled`, or
+`community` so you can see what the network taught your install. The registry is
+public — browse what's recorded at the server's `/about` and `/api/curefs`.
 
 The server also **re-validates itself**: every ~12h it re-checks each known
 device against TCL and records the current build, so **new firmware releases

@@ -17,11 +17,14 @@ Only device identifiers — nothing personal:
 | `tv`, `fw_id` | `AXAMWTM0`, `983299` | resolved target build |
 | `size` | `9663676416` | total package size in bytes (optional) |
 | `svn` | `v9.0.AXAM` | TCL software version (optional) |
+| `name` | `TCL 50 XL 5G` | device **model** name from a read-only build prop — same on every unit of the model (optional) |
 | `tool_version` | `3.5.0` | which client reported it |
 | `count`, `first_seen`, `last_seen` | | aggregation |
 
-**Not** stored: IMEI (the FOTA protocol uses a fixed placeholder), IP addresses,
-accounts, names, or locations. Reads are public so anyone can audit what's held.
+**Not** stored: IMEI or serial (the FOTA protocol uses a fixed placeholder), IP
+addresses, accounts, personal names, locations, or user-set device nicknames.
+The `name` field above is a *model* name, not a per-handset one. Reads are
+public so anyone can audit what's held.
 
 ## Endpoints
 

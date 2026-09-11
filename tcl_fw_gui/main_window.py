@@ -120,7 +120,8 @@ class MainWindow(QMainWindow):
         for t in sorted(templates.load(), key=lambda t: (t.name or t.curef).lower()):
             r = t.latest()
             tag = "   ·   NEW" if (r and r.is_new()) else ""
-            label = f"{t.curef}   ·   {t.name}{tag}" if t.name else f"{t.curef}{tag}"
+            nm = devices.friendly_name(t.curef, t.name)
+            label = f"{t.curef}   ·   {nm}{tag}" if nm else f"{t.curef}{tag}"
             self.curef_box.addItem(label, t.curef)
             self._tpl_mode[t.curef] = t.mode
             seen.add(t.curef)
@@ -367,8 +368,9 @@ class MainWindow(QMainWindow):
         names = {}
         try:
             for t in templates.load():
-                if t.name:
-                    names[t.curef] = t.name
+                nm = devices.friendly_name(t.curef, t.name)
+                if nm:
+                    names[t.curef] = nm
             for cu, d in devices.catalog().items():
                 names.setdefault(cu, d.name)
         except Exception:

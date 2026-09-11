@@ -30,6 +30,7 @@ class KnownDevice:
     tv: Optional[str] = None
     fw_id: Optional[str] = None
     name: str = ""
+    source: str = "builtin"     # builtin | bundled | community
 
 
 # Live-confirmed models (curef -> tv, fw_id, marketing name).
@@ -60,18 +61,82 @@ def _load_overlay() -> dict[str, KnownDevice]:
     return out
 
 
-def catalog() -> dict[str, KnownDevice]:
-    """All known devices: built-ins overlaid with community data/devices.json."""
+def model_of(curef: str) -> str:
+    """The model code a curef starts with: T807D1-2CLCA112 -> T807D1."""
+    return (curef or "").split("-")[0].strip().upper()
+
+
+def _name_index() -> dict[str, str]:
+    """model code -> marketing name, learned from every named entry we ship.
+
+    Community curefs arrive from the server with no name (the client never
+    submits one), but a sibling variant of the same model usually is named —
+    so T807W-2ATBUS12 can borrow T807W-EATBUS12-V's "TCL 50 XL 5G"."""
+    idx: dict[str, str] = {}
+    for cu, (_tv, _fw, nm) in _BUILTIN.items():
+        if nm:
+            idx.setdefault(model_of(cu), nm)
+    for d in _load_overlay().values():
+        if d.name:
+            idx.setdefault(model_of(d.curef), d.name)
+    try:
+        from . import templates as _tpl
+        for t in _tpl.load_bundled():
+            if t.name:
+                idx.setdefault(model_of(t.curef), t.name)
+    except Exception:
+        pass
+    return idx
+
+
+def friendly_name(curef: str, name: str = "") -> str:
+    """Best display name, never blank: an explicit name, else a named sibling
+    variant of the same model, else the bare model code."""
+    if name:
+        return name
+    return _name_index().get(model_of(curef)) or model_of(curef)
+
+
+def _community() -> dict[str, KnownDevice]:
+    """Devices known only through the template store — the bundled set plus
+    whatever `tcl-fw sync` has pulled from the community server."""
+    out: dict[str, KnownDevice] = {}
+    try:
+        from . import templates as _tpl
+        shipped = {t.curef for t in _tpl.load_bundled()}
+        for t in _tpl.load():
+            r = t.latest()
+            out[t.curef] = KnownDevice(
+                t.curef, r.tv if r else None, r.fw_id if r else None, t.name,
+                "bundled" if t.curef in shipped else "community")
+    except Exception:
+        pass
+    return out
+
+
+def catalog(include_community: bool = True) -> dict[str, KnownDevice]:
+    """Every device we can name. Built-ins, the bundled data/devices.json
+    overlay, and — unless told otherwise — the template store that `tcl-fw sync`
+    grows, so the CLI lists the same set the GUI does instead of drifting."""
     out = {
-        cu: KnownDevice(cu, tv, fw, name)
+        cu: KnownDevice(cu, tv, fw, name, "builtin")
         for cu, (tv, fw, name) in _BUILTIN.items()
     }
-    out.update(_load_overlay())
+    for cu, d in _load_overlay().items():
+        out[cu] = KnownDevice(d.curef, d.tv, d.fw_id, d.name, "bundled")
+    if include_community:
+        for cu, d in _community().items():
+            out.setdefault(cu, d)          # never downgrade a curated entry
+    for cu, d in out.items():
+        d.name = friendly_name(cu, d.name)
     return out
 
 
 def lookup(curef: str) -> Optional[KnownDevice]:
-    return catalog().get(curef)
+    """Resolution-time lookup. Deliberately excludes community entries: those
+    record builds we have *seen*, not a promise they are current, so a download
+    must discover the live build rather than pin a stale tv/fw_id."""
+    return catalog(include_community=False).get(curef)
 
 
 def search(query: str) -> list[KnownDevice]:

@@ -61,36 +61,28 @@ def _root(
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 def _device_fv_for(curef: str) -> Optional[str]:
-    """Read the current firmware version off a plugged-in phone whose curef
-    matches — so OTA gets a real fv without the user typing anything."""
-    if not adb.available():
-        return None
-    want = curef.lower().removesuffix("-v")
-    try:
-        for serial in adb.list_serials():
-            dev = adb.read_device(serial)
-            if dev.curef and dev.fv and dev.curef.lower().removesuffix("-v") == want:
-                return dev.fv
-    except Exception:
-        pass
-    return None
+    """Current firmware version off a plugged-in phone whose curef matches — so
+    OTA gets a real fv without the user typing anything."""
+    dev = adb.match(curef)
+    return dev.fv if dev else None
 
 
-def _auto_curef(curef: Optional[str]) -> tuple[str, Optional[str], Optional[str]]:
+def _auto_curef(curef: Optional[str]) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
     """Determine the curef: explicit arg, else a plugged-in phone. Returns
-    (curef, tv_hint, fw_hint) — the fw_hint (fv) is pulled from the device
-    build when a matching phone is connected, whether or not curef was typed."""
+    (curef, tv_hint, fv, model_name) — fv and the device's model name are read
+    off a matching connected phone, whether or not the curef was typed."""
     if curef:
-        fv = _device_fv_for(curef)
+        dev = adb.match(curef)
+        fv = dev.fv if dev else None
         if fv:
             console.print(f"[green]Read firmware version[/] [bold]{fv}[/] from the phone.")
-        return curef, None, fv
+        return curef, None, fv, (dev.name if dev else None)
     if adb.available():
         dev = adb.detect()
         if dev and dev.curef:
             console.print(f"[green]Detected device[/]: {dev.name or dev.model} "
                           f"→ curef [bold]{dev.curef}[/]")
-            return dev.curef, None, dev.fv
+            return dev.curef, None, dev.fv, dev.name
     raise typer.BadParameter(
         "no curef given and no phone detected. Pass a curef "
         "(adb shell getprop ro.tct.curef) or plug in a phone with USB debugging.")
@@ -144,12 +136,13 @@ def list_cmd(
 ):
     """List every partition for a device: name, size, and download URL."""
     _banner()
-    curef, _, fvh = _auto_curef(curef)
+    curef, _, fvh, dname = _auto_curef(curef)
     fvh = fv or fvh
     curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
     info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
     sharing.submit(curef, fvh, mode, tv, fw_id, size=sum(f.size for f in info.files),
-                   svn_fn=lambda: fota.check_svn(curef, mode, fvh or "000000"))
+                   svn_fn=lambda: fota.check_svn(curef, mode, fvh or "000000"),
+                   name=dname)
 
     known = devices.lookup(curef)
     console.print(f"\n[bold]{curef}[/]  {known.name if known else ''}")
@@ -197,12 +190,13 @@ def pull(
 ):
     """Download + decrypt a device's service package into flashable images."""
     _banner()
-    curef, _, fvh = _auto_curef(curef)
+    curef, _, fvh, dname = _auto_curef(curef)
     fvh = fv or fvh
     curef, tv, fw_id = _resolve_or_die(curef, tv, fw_id, mode=mode, fv=fvh)
     info = fota.request_download(curef, tv, fw_id, mode=mode, fv=fvh or "AAA000")
     sharing.submit(curef, fvh, mode, tv, fw_id, size=sum(f.size for f in info.files),
-                   svn_fn=lambda: fota.check_svn(curef, mode, fvh or "000000"))
+                   svn_fn=lambda: fota.check_svn(curef, mode, fvh or "000000"),
+                   name=dname)
 
     out = outdir or f"pkg_{curef.replace('/', '_')}"
     os.makedirs(out, exist_ok=True)
@@ -348,14 +342,26 @@ def devices_cmd(
         console.print(f"  fv:    {dev.fv}")
         return
 
+    cat = devices.catalog()
     table = Table(header_style="bold")
     table.add_column("CUREF", style="cyan")
     table.add_column("TV", style="dim")
     table.add_column("FW_ID", style="dim")
     table.add_column("NAME")
-    for d in devices.catalog().values():
-        table.add_row(d.curef, d.tv or "?", d.fw_id or "?", d.name)
+    table.add_column("SOURCE", style="dim")
+    _SRC = {"builtin": "built-in", "bundled": "bundled", "community": "[green]community[/]"}
+    for d in sorted(cat.values(), key=lambda d: (d.name or d.curef).lower()):
+        table.add_row(d.curef, d.tv or "?", d.fw_id or "?", d.name,
+                      _SRC.get(d.source, d.source))
     console.print(table)
+    grown = sum(1 for d in cat.values() if d.source == "community")
+    console.print()
+    if grown:
+        console.print(f"[dim]{len(cat)} devices - {grown} pulled from the "
+                      "community server by[/] [bold]tcl-fw sync[/][dim].[/]")
+    else:
+        console.print("[dim]Only built-in devices. Run[/] [bold]tcl-fw sync[/]"
+                      "[dim] to pull the community list.[/]")
 
 
 # Typer names the command from the function; expose it as `devices`.
@@ -395,7 +401,7 @@ def templates_cmd(
                 t.curef if i == 0 else "",
                 str(t.mode) if i == 0 else "",
                 r.tv, r.fw_id, r.first_seen, tag,
-                (t.name if i == 0 else ""),
+                (devices.friendly_name(t.curef, t.name) if i == 0 else ""),
             )
     console.print(table)
     console.print("\n[dim]Downloads always resolve the current build live; "

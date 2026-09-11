@@ -160,13 +160,18 @@ WHAT IT RECORDS
     fv            e.g. AXAMWTM0           (the firmware version)
     mode          2 (OTA) or 4 (FULL)
     tv, fw_id     the resolved target build, if any
+    size, svn     package size and TCL software version, if known
+    name          e.g. "TCL 50 XL 5G"     (the device MODEL name, read from
+                  a read-only build property - it is identical on every unit
+                  of that model, so it names the model, never your phone)
     tool_version  which tcl-fw version reported it
 
 WHAT IT DOES NOT RECORD
-  No IMEI (the FOTA protocol uses a fixed placeholder, not your real one).
-  No IP addresses. No account. No name, e-mail, or location. Nothing that
-  identifies you or your specific phone — only the model/build identifiers
-  that are the same across every identical device.
+  No IMEI or serial (the FOTA protocol uses a fixed placeholder, not your
+  real one). No IP addresses. No account. No personal name, e-mail, or
+  location. No user-set device nickname. Nothing that identifies you or your
+  specific phone — only the model/build identifiers that are the same across
+  every identical device.
 
 HOW IT HELPS
   New curef/fv combinations feed the tool's built-in device + firmware
@@ -200,7 +205,8 @@ function templatesFeed() {
     if (!r.tv || !r.fw_id) continue;
     const dkey = `${r.curef} ${r.mode}`;
     let dev = byDevice.get(dkey);
-    if (!dev) { dev = { curef: r.curef, mode: r.mode, releases: new Map() }; byDevice.set(dkey, dev); }
+    if (!dev) { dev = { curef: r.curef, mode: r.mode, name: "", releases: new Map() }; byDevice.set(dkey, dev); }
+    if (r.name && r.name.length > dev.name.length) dev.name = r.name;
     const rkey = `${r.tv} ${r.fw_id}`;
     const seen = dev.releases.get(rkey);
     // keep the earliest first_seen for a given build; carry size/api if known
@@ -219,6 +225,7 @@ function templatesFeed() {
   }
   return [...byDevice.values()].map((d) => ({
     curef: d.curef,
+    name: d.name || "",
     mode: parseInt(d.mode, 10) || 4,
     releases: [...d.releases.values()].sort((a, b) => (a.first_seen || "").localeCompare(b.first_seen || "")),
   }));
@@ -262,7 +269,14 @@ function handleRecord(req, res, body) {
   const api = Number.isInteger(apiNum) && apiNum > 0 && apiNum < 100 ? apiNum : null;
   const svn = RE_VER.test(String(data.svn || "")) ? String(data.svn) : null;  // TCL SW version
 
-  const { rec, known } = upsert({ curef, fv, mode, tv, fw_id, size, api, svn, ver, bump: true });
+  // Device model name: a read-only build prop, identical on every unit of a
+  // model. Collapse whitespace, drop control chars, cap the length.
+  const name = String(data.name || "")
+    .replace(/\s+/g, " ").trim()
+    .replace(/[^\x20-\x7E\u00A0-\uFFFF]/g, "")
+    .slice(0, 64) || null;
+
+  const { rec, known } = upsert({ curef, fv, mode, tv, fw_id, size, api, svn, name, ver, bump: true });
   if (!known) log(`NEW ${curef} fv=${fv} mode=${mode}`);
   return sendJson(res, 200, { ok: true, known, count: rec.count });
 }
@@ -272,7 +286,8 @@ function handleRecord(req, res, body) {
  * revalidation passes bump=false, validated=true (sets last_validated).
  */
 function upsert({ curef, fv = "", mode, tv = null, fw_id = null, size = null,
-                  api = null, svn = null, ver = null, bump = false, validated = false }) {
+                  api = null, svn = null, ver = null, name = null,
+                  bump = false, validated = false }) {
   const now = new Date().toISOString();
   // User submissions key by fv (their build). Revalidation has no fv, so it
   // keys by the discovered build (tv) instead — each new firmware TCL ships
@@ -283,7 +298,7 @@ function upsert({ curef, fv = "", mode, tv = null, fw_id = null, size = null,
   let known = true;
   if (!rec) {
     known = false;
-    rec = { curef, fv, mode, tv, fw_id, size: null, api: null, svn: null, count: 0, first_seen: now, last_seen: now, tool_versions: [] };
+    rec = { curef, fv, mode, tv, fw_id, size: null, api: null, svn: null, name: null, count: 0, first_seen: now, last_seen: now, tool_versions: [] };
     store.set(key, rec);
   }
   if (bump) { rec.count += 1; rec.last_seen = now; }
@@ -293,10 +308,13 @@ function upsert({ curef, fv = "", mode, tv = null, fw_id = null, size = null,
   if (size) rec.size = size;
   if (api) rec.api = api;
   if (svn) rec.svn = svn;
+  // Device model name (a read-only build prop). Keep the most descriptive one
+  // seen: a marketing name ("TCL 50 XL 5G") beats a bare model code ("T807W").
+  if (name && (!rec.name || name.length > rec.name.length)) rec.name = name;
   if (ver && !rec.tool_versions.includes(ver)) rec.tool_versions.push(ver);
 
   // append-only raw event log (best-effort)
-  fs.appendFile(EVENTS_FILE, JSON.stringify({ t: now, curef, fv, mode, tv, fw_id, size, api, svn, ver, validated }) + "\n", () => {});
+  fs.appendFile(EVENTS_FILE, JSON.stringify({ t: now, curef, fv, mode, tv, fw_id, size, api, svn, name, ver, validated }) + "\n", () => {});
   scheduleFlush();
   return { rec, known };
 }

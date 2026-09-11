@@ -160,9 +160,11 @@ class LoadWorker(QThread):
                 curef, tv, fw_id, mode=self._mode,
                 fv=self._fv if self._fv != "000000" else "AAA000")
             fv_used = None if self._fv == "000000" else self._fv
+            _dev = adb.match(curef)
             sharing.submit(curef, fv_used, self._mode, tv, fw_id,
                            size=sum(f.size for f in info.files),
-                           svn_fn=lambda: fota.check_svn(curef, self._mode, self._fv))
+                           svn_fn=lambda: fota.check_svn(curef, self._mode, self._fv),
+                           name=(_dev.name if _dev else None))
             if not info.files:
                 self.failed.emit("Server returned an empty fileset.")
                 return

@@ -44,8 +44,11 @@ NOTICE = """\
   version) with a community registry, so the built-in device list
   grows automatically for everyone.
 
-  Shared:   curef, firmware version, mode, resolved build, tool version
-  NOT shared: no IMEI, no IP, no account - nothing that identifies you.
+  Shared:   curef, firmware version, mode, resolved build, the device
+            model name (a read-only build property - the same on every
+            unit of that model), and the tcl-fw version.
+  NOT shared: no IMEI or serial, no IP, no account, no personal name,
+            no location - nothing identifying you or your handset.
 
   This is ON by default. Turn it off any time:   tcl-fw sharing --off
   See exactly what's recorded and why:            tcl-fw sharing
@@ -145,10 +148,21 @@ def _post(url: str, payload: dict) -> None:
         pass  # offline / server down / anything — silently ignore
 
 
+def clean_name(name: Optional[str]) -> str:
+    """Normalise a device model name for sharing. These come from read-only
+    build props (ro.tct.setupwizard.marketname / ro.product.model), so they name
+    the *model*, identically on every unit — never a user-set nickname. Kept
+    short and printable so a junk prop can't wander into the registry."""
+    s = " ".join((name or "").split())
+    s = "".join(c for c in s if c.isprintable())
+    return s[:64]
+
+
 def submit(curef: str, fv: Optional[str], mode: int,
            tv: Optional[str] = None, fw_id: Optional[str] = None,
            size: Optional[int] = None,
-           svn_fn: Optional[Callable[[], Optional[str]]] = None) -> None:
+           svn_fn: Optional[Callable[[], Optional[str]]] = None,
+           name: Optional[str] = None) -> None:
     """Report a looked-up device, if sharing is enabled. Non-blocking and
     failure-proof: spawns a daemon thread and returns immediately.
 
@@ -169,6 +183,9 @@ def submit(curef: str, fv: Optional[str], mode: int,
     }
     if size:
         payload["size"] = int(size)
+    nm = clean_name(name)
+    if nm:
+        payload["name"] = nm
 
     def _worker():
         if svn_fn:
@@ -191,9 +208,13 @@ def status_text() -> str:
         "When ON, after a lookup tcl-fw reports the device identifiers it used\n"
         "so the built-in device list grows for everyone:\n"
         "  shared:      curef, firmware version (fv), mode, resolved tv/fw_id,\n"
+        "               the device model name (e.g. 'TCL 50 XL 5G'), read from\n"
+        "               the read-only build props - identical on every unit of\n"
+        "               that model, so it names the model, not your phone,\n"
         "               tcl-fw version\n"
-        "  NOT shared:  IMEI (the protocol uses a fixed placeholder), IP address,\n"
-        "               account, name, location - nothing that identifies you.\n\n"
+        "  NOT shared:  IMEI or serial (the protocol uses a fixed placeholder),\n"
+        "               IP address, account, your name, location - nothing that\n"
+        "               identifies you or your individual handset.\n\n"
         f"  server:      {server_url() or '(none configured)'}\n"
         f"  config:      {_config_file()}\n\n"
         "Read what's recorded (public):  <server>/about  and  <server>/api/curefs\n"
