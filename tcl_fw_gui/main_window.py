@@ -378,7 +378,11 @@ class MainWindow(QMainWindow):
         self.db_table.setSortingEnabled(False)
         self.db_table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            nm = names.get(r["curef"])
+            # Local curated/synced name first, then whatever the server knows,
+            # then friendly_name's fallback (sibling variant, else model code) —
+            # so the database view never shows a bare curef while the CLI does.
+            nm = devices.friendly_name(
+                r["curef"], names.get(r["curef"]) or r.get("name") or "")
             label = f"{r['curef']}   ·   {nm}" if nm else r["curef"]
             mode_raw = str(r.get("mode") or "")
             mode_txt = {"2": "OTA (2)", "4": "FULL (4)"}.get(mode_raw, mode_raw or "—")

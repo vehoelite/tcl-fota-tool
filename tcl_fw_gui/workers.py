@@ -53,6 +53,7 @@ class DbFetchWorker(QThread):
                             "date": (rel.get("first_seen") or "")[:10],
                             "size": rel.get("size"), "mode": str(dev.get("mode", "")),
                             "svn": rel.get("svn"), "fv": "",
+                            "name": dev.get("name") or "",
                         })
         except Exception:
             rows = []
@@ -64,6 +65,7 @@ class DbFetchWorker(QThread):
                             "curef": t.curef, "tv": rel.tv,
                             "date": (rel.first_seen or "")[:10],
                             "size": None, "mode": str(t.mode), "svn": None, "fv": "",
+                            "name": t.name or "",
                         })
             except Exception:
                 pass
