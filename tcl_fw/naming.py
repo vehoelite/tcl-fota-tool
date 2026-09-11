@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import struct
+import zlib
 from dataclasses import dataclass
 from typing import Optional
 
@@ -132,6 +133,63 @@ def ext4_label(d: bytes) -> Optional[str]:
     return None
 
 
+def zip_entry(head: bytes) -> Optional[dict]:
+    """The first local file entry of a ZIP, read from the front (the central
+    directory lives at the end, so this works on a truncated head)."""
+    if head[:4] != b"PK\x03\x04" or len(head) < 30:
+        return None
+    try:
+        (_ver, flags, method, _mt, _md, crc,
+         csz, usz, nlen, elen) = struct.unpack_from("<HHHHHIIIHH", head, 4)
+        name = head[30:30 + nlen].decode("latin1", "replace")
+        return {"name": name, "method": method, "flags": flags, "crc": crc,
+                "comp_size": csz, "size": usz, "data_offset": 30 + nlen + elen}
+    except Exception:
+        return None
+
+
+def zip_inner_head(head: bytes, want: int = 1 << 16) -> Optional[bytes]:
+    """Decompress the start of a zip's first entry (stored or deflate)."""
+    e = zip_entry(head)
+    if not e:
+        return None
+    data = head[e["data_offset"]:]
+    if not data:
+        return None
+    if e["method"] == 0:
+        return data[:want]
+    if e["method"] == 8:
+        try:
+            return zlib.decompressobj(-15).decompress(data, want)
+        except Exception:
+            return None
+    return None
+
+
+def zip_wrapped_image(head: bytes) -> Optional[tuple[str, str, dict]]:
+    """(name, ext, entry) when a zip's payload is itself a partition image.
+
+    TCL ships the big filesystem partitions triple-wrapped — zip -> .mbn ->
+    Android sparse -> ext4 — so the partition a user actually wants is two
+    layers down. Returns None for zips of ordinary files (block maps,
+    target_files), which are not partitions and must stay zipped."""
+    e = zip_entry(head)
+    if not e:
+        return None
+    inner = zip_inner_head(head)
+    if not inner:
+        return None
+    looks_like_image = (
+        is_filesystem(inner)
+        or inner[:4] in (b"\x88\x16\x88\x58", b"AVB0", b"ANDR", b"\xd7\xb7\xab\x1e")
+        or inner[:8] == b"ANDROID!"
+    )
+    if not looks_like_image:
+        return None
+    n, x = magic_name(inner)          # inner is an image, so this cannot recurse
+    return n, x, e
+
+
 def _zip_first_entry(b: bytes) -> Optional[str]:
     """Name of the first local file inside a ZIP, read from its front (the
     central directory sits at the end, so this works on a truncated head)."""
@@ -159,6 +217,9 @@ def magic_name(b: bytes) -> tuple[str, str]:
         hit = fs_label(unsparse_head(b))
         return (alias(hit[0]) if hit else "sparse"), "img"
     if b[:4] == b"PK\x03\x04":
+        wrapped = zip_wrapped_image(b)
+        if wrapped:                   # zip-wrapped partition: name it by content
+            return wrapped[0], wrapped[1]
         inner = _zip_first_entry(b) or ""
         low = inner.lower()
         if low.startswith("target_files") or low.endswith((".p", "updater")):

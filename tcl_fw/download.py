@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import http.client
+import zlib
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -46,6 +47,81 @@ def _content_range_total(cr: Optional[str]) -> Optional[int]:
         if tail.isdigit():
             return int(tail)
     return None
+
+
+def stream_unwrap(slave: str, rel: str, dest: str, entry: dict,
+                  on_progress: ProgressCb = None, timeout: int = 120
+                  ) -> tuple[int, str, int]:
+    """Stream a zip-wrapped payload, inflating its first entry straight to dest.
+
+    TCL wraps the big partitions as zip -> .mbn -> sparse, so the container has
+    no value of its own. Decompressing in-flight means the 720 MB archive never
+    touches the disk — only the image inside it does.
+
+    The raw (still-compressed) bytes are hashed as they pass through, so the
+    server's body checksum can still be verified even though what we write is
+    the decompressed image. Returns (bytes_written, raw_sha1, raw_bytes).
+
+    No resume: an inflate stream can't restart mid-way, so a retry starts over.
+    """
+    req = urllib.request.Request("http://%s%s" % (slave, rel),
+                                 headers={"User-Agent": USER_AGENT})
+    h = hashlib.sha1()
+    dec = zlib.decompressobj(-15) if entry.get("method") == 8 else None
+    skip = entry.get("data_offset", 0)          # bytes of zip header to drop
+    # comp_size is 0 when the entry uses a trailing data descriptor; then we
+    # just feed everything and let the decompressor stop at the stream end.
+    remaining = entry.get("comp_size") or None
+    raw = written = 0
+
+    with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+        total = int(r.headers.get("Content-Length", 0)) or None
+        if on_progress:
+            on_progress(0, total)
+        while True:
+            buf = r.read(1 << 20)
+            if not buf:
+                break
+            h.update(buf)                        # hash the body as served
+            raw += len(buf)
+            chunk = buf
+            if skip:
+                if len(chunk) <= skip:
+                    skip -= len(chunk)
+                    chunk = b""
+                else:
+                    chunk = chunk[skip:]
+                    skip = 0
+            if chunk and remaining is not None:
+                chunk = chunk[:remaining]
+                remaining -= len(chunk)
+            if chunk:
+                out = dec.decompress(chunk) if dec else chunk
+                if out:
+                    f.write(out)
+                    written += len(out)
+            if on_progress:
+                on_progress(raw, total)
+        if dec:
+            out = dec.flush()
+            if out:
+                f.write(out)
+                written += len(out)
+
+    # A short body yields a short image. Silently writing a truncated system.img
+    # is the dangerous outcome here — someone could flash it — so fail loudly and
+    # delete the partial instead of leaving something that looks complete.
+    short = (remaining or 0) > 0 or (dec is not None and not dec.eof)
+    if short:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise IOError(
+            "wrapped payload ended early: got %d of %d compressed bytes "
+            "(the download is incomplete)"
+            % (raw, (entry.get("data_offset", 0) + (entry.get("comp_size") or 0))))
+    return written, h.hexdigest(), raw
 
 
 def stream_body(slave: str, rel: str, dest: str,

@@ -156,13 +156,30 @@ Partitions are named **authoritatively**, never guessed. In order of preference
 3. **Content identification** — MTK GFH partition name, the **ext4 / f2fs /
    erofs** superblock read *through* the Android sparse container (so a sparse
    `vendor`/`cache`/`userdata` comes out named, not as an anonymous `sparse`),
-   AVB / boot / dtbo magic, and zip-wrapped payloads by their first entry.
+   AVB / boot / dtbo magic, and zip-wrapped payloads by what's inside them.
+
+### Wrapped partitions
+
+TCL ships the largest filesystem partitions **triple-wrapped**: a zip containing
+a `.mbn`, which is an Android **sparse** image, which is the actual ext4
+filesystem. Handed over as-is it's an opaque archive that even `unzip` may
+refuse (the entry is bigger than 4 GiB of plain deflate, and a partial download
+has no readable central directory).
+
+`tcl-fw` **unwraps these in-flight**: the container is inflated as it downloads,
+so what lands on disk is `system.img` — the real partition image — and the
+720 MB archive is never written at all. The bytes are hashed *as served*, so the
+server's SHA-1 still verifies. A short body is rejected and the partial image
+deleted rather than left looking complete.
+
+Zips that hold ordinary files (`system.map`, `vendor.map`, the `target_files`
+manifest) are **not** partitions and are deliberately left alone.
 
 ## Output
 
 ```
 pkg_<curef>/
-  lk.img  boot.img  vbmeta.img  vendor.img  cache.img  userdata.img  …
+  lk.img  boot.img  vbmeta.img  system.img  vendor.img  cache.img  userdata.img  …
   <device>.sca            # the flash-tool scatter (when the server serves one)
   scatter_emmc.txt        # recovered partition layout (embedded-manifest devices)
   misc_info.txt           # partition fs types + sizes (embedded-manifest devices)

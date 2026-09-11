@@ -22,7 +22,7 @@ from typing import Callable, Optional
 
 from . import fota, manifest as manifest_mod, naming
 from .crypto import decrypt_header
-from .download import fetch_checksums, sha1_file, stream_body
+from .download import fetch_checksums, sha1_file, stream_body, stream_unwrap
 from .fota import DownloadInfo, FileEntry
 
 # How much of a body to fetch for content-naming: enough to un-sparse block 0
@@ -47,6 +47,7 @@ class PullPlan:
     names: dict[str, str] = field(default_factory=dict)   # FILE_ID -> real name
     sizes: dict[str, int] = field(default_factory=dict)   # FILE_ID -> body size
     manifest: Optional["manifest_mod.Manifest"] = None    # embedded target_files manifest
+    heads: dict[str, bytes] = field(default_factory=dict)  # FILE_ID -> body head
 
 
 # ── naming ──────────────────────────────────────────────────────────────────
@@ -155,12 +156,19 @@ def _resolve_name(plan: PullPlan, f: FileEntry, is_small: bool) -> Optional[str]
     # offset 1024) and to read a zip's first entry name, so sparse partitions get
     # their real label (vendor/cache/userdata) instead of an anonymous "sparse".
     head = fota.body_head(plan.info.slave, f.rel_url, n=NAME_HEAD_BYTES) if plan.info.slave else b""
+    plan.heads[f.file_id] = head          # reused by pull_one, so we fetch once
     n, e = naming.magic_name(head)
+    # Size-matching must look at the *real* image, which for the big partitions
+    # sits inside a zip wrapper — the container's size means nothing.
+    wrapped = naming.zip_wrapped_image(head)
+    probe = (naming.zip_inner_head(head) or head) if wrapped else head
     # If the pack embedded a manifest, let it authoritatively name a filesystem
     # partition by its raw size — this catches a blank ext4 label (tctpersist)
     # and confirms the label-read ones.
-    if plan.manifest and naming.is_filesystem(head):
-        raw = naming.sparse_raw_size(head) or plan.sizes.get(f.file_id, -1)
+    if plan.manifest and naming.is_filesystem(probe):
+        raw = naming.sparse_raw_size(probe)
+        if raw is None and not wrapped:
+            raw = plan.sizes.get(f.file_id, -1)
         mn = plan.manifest.name_for_size(raw) if raw and raw > 0 else None
         if mn:
             n = naming.alias(mn)
@@ -191,12 +199,27 @@ def pull_one(plan: PullPlan, f: FileEntry, outdir: str,
                 fh.write(img)
             res = PartResult(f.file_id, name, "header", size=len(img), path=dest)
         else:
-            got = stream_body(info.slave, f.rel_url, dest, on_progress)
-            res = PartResult(f.file_id, name, "body", size=got, path=dest)
-            if verify and info.encslave:
-                cs = fetch_checksums(info.encslave, f.rel_url)
-                if cs and cs.body:
-                    res.verified = (sha1_file(dest) == cs.body.lower())
+            head = plan.heads.get(f.file_id)
+            if head is None and info.slave:
+                head = fota.body_head(info.slave, f.rel_url, n=NAME_HEAD_BYTES)
+            wrapped = naming.zip_wrapped_image(head) if head else None
+            if wrapped:
+                # zip -> .mbn -> image: inflate in-flight so the container never
+                # lands on disk, and verify the checksum of the bytes as served.
+                got, body_sha, _raw = stream_unwrap(
+                    info.slave, f.rel_url, dest, wrapped[2], on_progress)
+                res = PartResult(f.file_id, name, "body", size=got, path=dest)
+                if verify and info.encslave:
+                    cs = fetch_checksums(info.encslave, f.rel_url)
+                    if cs and cs.body:
+                        res.verified = (body_sha == cs.body.lower())
+            else:
+                got = stream_body(info.slave, f.rel_url, dest, on_progress)
+                res = PartResult(f.file_id, name, "body", size=got, path=dest)
+                if verify and info.encslave:
+                    cs = fetch_checksums(info.encslave, f.rel_url)
+                    if cs and cs.body:
+                        res.verified = (sha1_file(dest) == cs.body.lower())
         return res
     except Exception as e:
         return PartResult(f.file_id, name, "small" if is_small else "body", error=str(e))
