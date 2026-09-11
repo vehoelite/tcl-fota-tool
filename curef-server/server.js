@@ -57,7 +57,12 @@ function loadStore() {
   try {
     const raw = JSON.parse(fs.readFileSync(AGG_FILE, "utf8"));
     for (const rec of raw.records || []) {
-      store.set(`${rec.curef} ${rec.fv} ${rec.mode}`, rec);
+      // Use the persisted key. Re-deriving it as `curef fv mode` collapsed every
+      // revalidated build (which keys by `curef @tv mode` and has no fv) into a
+      // single slot, so each restart silently dropped release history.
+      const key = rec._key || `${rec.curef} ${rec.fv} ${rec.mode}`;
+      delete rec._key;
+      store.set(key, rec);
     }
     log(`loaded ${store.size} records from ${AGG_FILE}`);
   } catch (e) {
@@ -75,7 +80,10 @@ function flush() {
   flushTimer = null;
   if (!dirty) return;
   dirty = false;
-  const records = [...store.values()];
+  // Persist each record's store key so reload reconstructs the map exactly.
+  // _key lives only in the file; the in-memory records (and the public API)
+  // never carry it.
+  const records = [...store.entries()].map(([key, rec]) => Object.assign({ _key: key }, rec));
   const payload = JSON.stringify({ updated: new Date().toISOString(), count: records.length, records });
   const tmp = AGG_FILE + ".tmp";
   try {
