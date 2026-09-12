@@ -72,6 +72,71 @@ class DbFetchWorker(QThread):
         self.loaded.emit(rows)
 
 
+class VerifyWorker(QThread):
+    """Verify a package signature, or inspect its signing certs, off-thread."""
+
+    done = Signal(str, bool)    # (report text, ok)
+
+    def __init__(self, path: str):
+        super().__init__()
+        self._path = path
+
+    def run(self) -> None:
+        import zipfile
+
+        from tcl_fw import signing
+        if not signing.AVAILABLE:
+            self.done.emit(signing.MISSING_MSG, False)
+            return
+        try:
+            with open(self._path, "rb") as fh:
+                is_zip = fh.read(4) == b"PK\x03\x04"
+            has_v1 = False
+            if is_zip:
+                try:
+                    has_v1 = any(n.upper().startswith("META-INF/")
+                                 and n.upper().endswith((".RSA", ".DSA", ".EC"))
+                                 for n in zipfile.ZipFile(self._path).namelist())
+                except Exception:
+                    has_v1 = False
+
+            if has_v1:
+                r = signing.verify_apk(self._path)
+                lines = [f"{'VERIFIED' if r.ok else 'FAILED'}   "
+                         f"(Android v1 / {r.digest})", ""]
+                if r.signer:
+                    tcl = "  (official TCL key)" if r.signer.is_tcl else ""
+                    lines += [f"signed by {r.signer.common_name}{tcl}",
+                              f"  {r.signer.key_type} {r.signer.key_bits or ''}  "
+                              f"valid {r.signer.not_before} - {r.signer.not_after}",
+                              f"  SHA-256 {r.signer.sha256}"]
+                if r.tampered:
+                    lines += ["", f"{len(r.tampered)} modified file(s):"]
+                    lines += [f"  ! {t}" for t in r.tampered[:12]]
+                    if len(r.tampered) > 12:
+                        lines.append(f"  ... and {len(r.tampered) - 12} more")
+                lines += ["", *r.errors]
+                self.done.emit("\n".join(lines).strip(), r.ok)
+                return
+
+            with open(self._path, "rb") as fh:
+                data = fh.read()
+            certs = signing.certs_in(data, self._path.replace("\\", "/").split("/")[-1])
+            if not certs:
+                self.done.emit("No X.509 certificates found, and no v1 signature "
+                               "to verify.", False)
+                return
+            out = [f"{len(certs)} certificate(s):", ""]
+            for c in certs:
+                out.append(c.summary())
+                if c.source:
+                    out.append(f"    from {c.source}")
+                out.append("")
+            self.done.emit("\n".join(out).strip(), True)
+        except Exception as e:
+            self.done.emit(f"verify failed: {e}", False)
+
+
 class DetectWorker(QThread):
     """Probe for a plugged-in phone and read its curef."""
 

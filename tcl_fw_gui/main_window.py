@@ -26,7 +26,7 @@ from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
 
 from .workers import (DbFetchWorker, DetectWorker, LoadWorker, NameProbeWorker,
-                      PackWorker, PullWorker)
+                      PackWorker, PullWorker, VerifyWorker)
 
 CREDIT = "Mode-4 header decryption by Littlenine Ennea · github.com/LittlenineEnnea"
 
@@ -272,6 +272,12 @@ class MainWindow(QMainWindow):
         self.db_btn.setCheckable(True)
         self.db_btn.toggled.connect(self._toggle_database)
         arow.addWidget(self.db_btn)
+        self.verify_btn = QPushButton("🔒 Verify…")
+        self.verify_btn.setToolTip("Check an APK / signed package's signature, or "
+                                   "inspect the signing certificates in a firmware "
+                                   "blob. Proves authenticity — it cannot sign anything.")
+        self.verify_btn.clicked.connect(self.on_verify)
+        arow.addWidget(self.verify_btn)
         arow.addStretch(1)
         self.overall = QProgressBar()
         self.overall.setMaximumWidth(240)
@@ -714,6 +720,32 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Choose output folder")
         if d:
             self.out_edit.setText(d)
+
+    def on_verify(self) -> None:
+        from tcl_fw import signing
+        if not signing.AVAILABLE:
+            QMessageBox.information(self, "Verify", signing.MISSING_MSG)
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Verify a package or inspect its certificates", "",
+            "Packages & certs (*.apk *.zip *.pem *.der *.x509 *.crt);;All files (*)")
+        if not path:
+            return
+        self.verify_btn.setEnabled(False)
+        self._status(f"Verifying {os.path.basename(path)} …")
+        self._verify_worker = VerifyWorker(path)
+        self._verify_worker.done.connect(self._on_verify_done)
+        self._verify_worker.finished.connect(lambda: self.verify_btn.setEnabled(True))
+        self._verify_worker.start()
+
+    def _on_verify_done(self, report: str, ok: bool) -> None:
+        self._log(report)
+        self._status("Verified." if ok else "Verification failed / see log.")
+        box = QMessageBox(self)
+        box.setWindowTitle("Signature verification")
+        box.setIcon(QMessageBox.Information if ok else QMessageBox.Warning)
+        box.setText(report)
+        box.exec()
 
     def on_pack(self) -> None:
         outdir = getattr(self, "_last_outdir", None) or self.out_edit.text().strip()

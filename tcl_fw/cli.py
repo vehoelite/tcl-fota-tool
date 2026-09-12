@@ -466,5 +466,91 @@ def sharing_cmd(
     console.print(sharing.status_text())
 
 
+@app.command("verify")
+def verify_cmd(
+    path: str = typer.Argument(..., help="An APK / signed zip to verify, or a "
+                               "firmware blob to inspect for signing certs."),
+    against: Optional[str] = typer.Option(
+        None, "--against", help="A reference certificate (.pem/.der) the signer "
+        "must match exactly (strict cryptographic identity)."),
+):
+    """Verify a package's signature, or inspect the certificates a device trusts.
+
+    Proves a package was signed by its certificate AND not modified since; it
+    cannot sign anything (that needs the private key, which never ships in
+    firmware). See the note in [bold]tcl-fw verify --help[/] output above."""
+    from . import signing
+    _banner()
+    if not signing.AVAILABLE:
+        console.print(f"[yellow]{signing.MISSING_MSG}[/]")
+        raise typer.Exit(2)
+    if not os.path.exists(path):
+        console.print(f"[red]No such file:[/] {path}")
+        raise typer.Exit(1)
+
+    with open(path, "rb") as fh:
+        head = fh.read(4)
+    is_zip = head == b"PK\x03\x04"
+    ref = None
+    if against:
+        with open(against, "rb") as fh:
+            ref = fh.read()
+
+    # A zip with a v1 signature -> verify it; anything else -> inspect its certs.
+    has_v1 = False
+    if is_zip:
+        try:
+            import zipfile
+            has_v1 = any(n.upper().startswith("META-INF/")
+                         and n.upper().endswith((".RSA", ".DSA", ".EC"))
+                         for n in zipfile.ZipFile(path).namelist())
+        except Exception:
+            has_v1 = False
+
+    if has_v1:
+        r = signing.verify_apk(path, against=ref)
+        mark = "[green]VERIFIED[/]" if r.ok else "[red]FAILED[/]"
+        console.print(f"\n{mark}   [dim](Android v1 / {r.digest})[/]\n")
+        if r.signer:
+            tcl = " [green](official TCL key)[/]" if r.signer.is_tcl else ""
+            console.print(f"[bold]signed by[/] {r.signer.common_name}{tcl}")
+            console.print(f"  {r.signer.key_type} {r.signer.key_bits or ''}  "
+                          f"valid {r.signer.not_before} -> {r.signer.not_after}")
+            console.print(f"  [dim]SHA-256[/] {r.signer.sha256}")
+        if r.matches_reference is not None:
+            console.print(("[green]  matches the reference certificate[/]"
+                           if r.matches_reference else
+                           "[red]  does NOT match the reference certificate[/]"))
+        if r.tampered:
+            console.print(f"\n[red]{len(r.tampered)} modified file(s):[/]")
+            for t in r.tampered[:12]:
+                console.print(f"    [red]![/] {t}")
+            if len(r.tampered) > 12:
+                console.print(f"    [dim]… and {len(r.tampered) - 12} more[/]")
+        for e in r.errors:
+            console.print(f"[red]  {e}[/]")
+        raise typer.Exit(0 if r.ok else 1)
+
+    # inspection
+    with open(path, "rb") as fh:
+        data = fh.read()
+    certs = signing.certs_in(data, os.path.basename(path))
+    if not certs:
+        console.print("[yellow]No X.509 certificates found here, and no v1 "
+                      "signature to verify.[/]")
+        raise typer.Exit(1)
+    console.print(f"\n[bold]{len(certs)} certificate(s):[/]\n")
+    for c in certs:
+        console.print(c.summary())
+        if c.source:
+            console.print(f"    [dim]from {c.source}[/]")
+        if ref is not None:
+            same = signing.load_cert(ref)
+            console.print(("[green]    matches the reference certificate[/]"
+                           if same and same.sha256 == c.sha256 else
+                           "[dim]    (does not match the reference)[/]"))
+        console.print("")
+
+
 if __name__ == "__main__":
     app()

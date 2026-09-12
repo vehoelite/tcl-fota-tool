@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tcl-fw"
-version = "4.2.0"
+version = "4.3.0"
 description = "Pull and decrypt official TCL (MediaTek) FOTA firmware — flashable service packages, fully offline."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,7 +29,9 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.6"]
-dev = ["pytest>=8.0", "pyinstaller>=6.0", "PySide6>=6.6"]
+verify = ["cryptography>=42.0", "pyasn1>=0.6", "pyasn1-modules>=0.4"]
+dev = ["pytest>=8.0", "pyinstaller>=6.0", "PySide6>=6.6",
+       "cryptography>=42.0", "pyasn1>=0.6", "pyasn1-modules>=0.4"]
 
 [project.urls]
 Homepage = "https://github.com/vehoelite/tcl-fota-tool"

@@ -24,6 +24,7 @@ Works on TCL-made Android devices (TCL, REVVL, Alcatel).
 ```bash
 pip install tcl-fw          # CLI only
 pip install "tcl-fw[gui]"   # CLI + desktop app (PySide6)
+pip install "tcl-fw[verify]" # + signature verification (cryptography + pyasn1)
 ```
 
 Or grab the standalone `tcl-fw` / `tcl-fw.exe` (CLI) or `tcl-fw-gui.exe`
@@ -80,6 +81,7 @@ adb shell getprop ro.tct.curef
 | `tcl-fw templates [--all]` | List validated firmware templates with a **NEW** tag on recent builds (`--all` shows full release history). |
 | `tcl-fw sync` | Pull newly-recorded devices from the community server into your device list. |
 | `tcl-fw sharing [--on\|--off]` | Show or change community device-ID sharing (opt-out, nothing personal). |
+| `tcl-fw verify <file>` | Verify an APK / signed package's signature, or inspect the signing certificates inside a firmware blob. `--against <cert>` for a strict identity check. Needs `pip install "tcl-fw[verify]"`. |
 
 ## Community device database (opt-out)
 
@@ -121,6 +123,32 @@ device against TCL and records the current build, so **new firmware releases
 grow the history on their own** — even for a device nobody's looked up lately.
 Server code, the self-updating logic, and privacy details live in
 [`curef-server/`](curef-server/).
+
+## Verify signatures (`verify`)
+
+`tcl-fw verify` answers two questions using the certificates that ship in the
+firmware itself:
+
+```bash
+tcl-fw verify some.apk                  # is this genuinely signed + untampered?
+tcl-fw verify some.apk --against rk.pem # …and by exactly this key?
+tcl-fw verify vendor_map_*.zip          # which signing cert(s) does this blob carry?
+```
+
+For an APK / signed zip it runs the full **Android v1 (JAR)** check — the
+`CERT.RSA` signature over `CERT.SF`, `CERT.SF`'s digest over the manifest, and
+the manifest's digest over **every file** — so it catches both a wrong signer
+and any modified byte, and reports who signed it (flagging official TCL keys).
+For a firmware blob it extracts and describes the signing certificates inside
+(`releasekey.x509.pem`, `otacerts.zip`, …) — the trust anchors a device checks
+its updates against. It reads even the truncated zips TCL ships, which `unzip`
+refuses.
+
+> **It verifies; it cannot sign.** Verification uses a *public* certificate.
+> Creating a signature a device would trust needs the matching *private* key,
+> which lives in TCL's build HSM and never ships in firmware. Nothing here
+> bypasses verified boot. (This is a different key entirely from the universal
+> AES key the tool uses to *decrypt* download headers — see below.)
 
 ## How it works
 
