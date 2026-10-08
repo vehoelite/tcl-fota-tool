@@ -19,6 +19,41 @@ Works on TCL-made Android devices (TCL, REVVL, Alcatel).
 
 ---
 
+## What's new in 4.3.1 — safety patch
+
+A review of the naming path found three ways the tool could write the **wrong
+bytes under a right-looking filename**. None of them have been reported in the
+wild, and all three are fixed here. If you pull firmware with `tcl-fw`, update.
+
+* **Two partitions could be written to one file.** The `.sca` join is not
+  injective, so several coded names can resolve to one real name (`lk.img`).
+  Because the authoritative path used that name verbatim, two images could
+  share a destination — and a resumed download would **append** the second onto
+  the first, producing a spliced image under a clean, trusted-looking name.
+  Destinations are now reserved: a later claimant is suffixed with its
+  `FILE_ID`, and the clash is reported and recorded in `manifest.json`.
+* **A network blip could turn a partition into its own header.** A failed size
+  probe returned `-1`, which the pull path read as "empty body" — the signal
+  meaning *the image lives in the encrypted header*. A timeout on a large
+  partition would therefore decrypt its 4 MiB header and write **that** out as
+  the image. A failed probe is now distinct from an empty body: the tool
+  re-probes once and then refuses to guess, reporting the file as not pulled.
+* **`pack` could rename `recovery.img` to `boot.img`.** Boot-family images were
+  told apart by size (larger = `boot`, smaller = `init_boot`). `init_boot` only
+  exists on Android 13+ GKI devices; on the non-A/B devices common in TCL's MTK
+  line the second `ANDROID!` image is `recovery`, and recovery is usually the
+  larger. This ran at a confidence above the rename threshold. Boot images are
+  now classified by their header fields, and a genuinely ambiguous pair is left
+  alone for a human instead of guessed.
+
+Also: downloads stage to a `FILE_ID`-keyed `.part` file, so a partial pull never
+looks like a flashable image; content guesses are kept out of the dictionary
+reserved for server-authoritative names; and `alias()` no longer matches on bare
+substrings (a partition labelled `platform` came out named `tee`, because "atf"
+is a substring of "platform").
+
+---
+
 ## Install
 
 ```bash
@@ -171,8 +206,8 @@ handles both automatically:
   The header is padded with a constant filler block, which `tcl-fw` detects and
   trims to recover the exact image.
 
-Partitions are named **authoritatively**, never guessed. In order of preference
-`tcl-fw` uses:
+Partitions are named from the **best evidence available**, and the tool is
+explicit about which it had. In order of preference `tcl-fw` uses:
 
 1. **The `.sca` scatter** — the `check_new.php` manifest joined to the scatter's
    `rename_prefix → file_name` map (real names like `lk.img`, `vbmeta.img`).
@@ -185,6 +220,18 @@ Partitions are named **authoritatively**, never guessed. In order of preference
    erofs** superblock read *through* the Android sparse container (so a sparse
    `vendor`/`cache`/`userdata` comes out named, not as an anonymous `sparse`),
    AVB / boot / dtbo magic, and zip-wrapped payloads by what's inside them.
+
+Only (1) and (2) are authoritative; (3) is inference from the bytes, and a name
+that came from it always carries the `FILE_ID` suffix (`vbmeta_664532.img`) to
+say so. Two files can never share a destination: if a name is already taken the
+second file is suffixed and the clash is reported at the end of the pull and
+recorded as `"collided": true` in `manifest.json`. **At most one of a clashing
+pair is really that partition — check both before flashing either.**
+
+Some magics are genuinely ambiguous and the tool does not pretend otherwise:
+`ANDROID!` is shared by `boot` / `init_boot` / `recovery`, and `AVB0` by
+`vbmeta` / `vbmeta_system` / `vbmeta_vendor`. Resolving these properly (from the
+AVB footer each image carries) is the subject of the next release.
 
 ### Wrapped partitions
 

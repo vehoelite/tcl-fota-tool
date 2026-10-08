@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -39,6 +40,7 @@ class PartResult:
     path: Optional[str] = None
     verified: Optional[bool] = None
     error: Optional[str] = None
+    collided: bool = False    # another file already claimed this name
 
 
 @dataclass
@@ -48,6 +50,34 @@ class PullPlan:
     sizes: dict[str, int] = field(default_factory=dict)   # FILE_ID -> body size
     manifest: Optional["manifest_mod.Manifest"] = None    # embedded target_files manifest
     heads: dict[str, bytes] = field(default_factory=dict)  # FILE_ID -> body head
+    # Content-derived names live apart from `names`, which is reserved for
+    # server-authoritative ones: once a guess is written into `names` there is
+    # no way to tell the two apart again.
+    guessed: dict[str, str] = field(default_factory=dict)  # FILE_ID -> guessed name
+    # basename -> FILE_ID. The .sca join is not injective (several coded names
+    # can map to one file_name), so without this two partitions can resolve to
+    # the same destination — and a resumed body append itself onto the other.
+    claimed: dict[str, str] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def claim(self, name: str, file_id: str) -> tuple[str, bool]:
+        """Reserve `name` for `file_id`. Returns (unique_name, collided).
+
+        The first claimant keeps the clean name; a later one is suffixed with
+        its FILE_ID so two images can never share a path. Thread-safe: the GUI
+        pulls in parallel."""
+        with self._lock:
+            owner = self.claimed.get(name)
+            if owner is None:
+                self.claimed[name] = file_id
+                return name, False
+            if owner == file_id:                  # re-resolved, same file
+                return name, False
+            stem, dot, ext = name.rpartition(".")
+            alt = ("%s_%s.%s" % (stem, file_id, ext) if dot
+                   else "%s_%s" % (name, file_id))
+            self.claimed[alt] = file_id
+            return alt, True
 
 
 # ── naming ──────────────────────────────────────────────────────────────────
@@ -127,7 +157,10 @@ def build_plan(curef: str, info: DownloadInfo,
     sizes: dict[str, int] = {}
 
     def probe(f: FileEntry) -> tuple[str, int]:
-        return f.file_id, (fota.body_size(info.slave, f.rel_url) if info.slave else -1)
+        # No body server at all => every image lives in its encrypted header.
+        # That is a real answer (0), not a failed probe (-1): keeping them
+        # distinct is what lets pull_one refuse to guess after a network error.
+        return f.file_id, (fota.body_size(info.slave, f.rel_url) if info.slave else 0)
 
     with ThreadPoolExecutor(max_workers=probe_workers) as ex:
         for fid, sz in ex.map(probe, info.files):
@@ -144,6 +177,9 @@ def _resolve_name(plan: PullPlan, f: FileEntry, is_small: bool) -> Optional[str]
     nm = plan.names.get(f.file_id)
     if nm:
         return nm
+    nm = plan.guessed.get(f.file_id)               # already identified by content
+    if nm:
+        return nm
     if is_small:
         if not plan.info.encslave:
             return None
@@ -151,7 +187,8 @@ def _resolve_name(plan: PullPlan, f: FileEntry, is_small: bool) -> Optional[str]
         if len(enc) < 16:
             return None
         n, e = naming.magic_name(decrypt_header(enc))
-        return "%s_%s.%s" % (n, f.file_id, e)
+        plan.guessed[f.file_id] = "%s_%s.%s" % (n, f.file_id, e)
+        return plan.guessed[f.file_id]
     # 64 KiB is enough to un-sparse block 0 (the ext4/f2fs superblock sits at raw
     # offset 1024) and to read a zip's first entry name, so sparse partitions get
     # their real label (vendor/cache/userdata) instead of an anonymous "sparse".
@@ -171,8 +208,10 @@ def _resolve_name(plan: PullPlan, f: FileEntry, is_small: bool) -> Optional[str]
             raw = plan.sizes.get(f.file_id, -1)
         mn = plan.manifest.name_for_size(raw) if raw and raw > 0 else None
         if mn:
-            n = naming.alias(mn)
-    return "%s_%s.%s" % (n, f.file_id, e)
+            n = mn          # a manifest name is already the partition's real
+                            # name; alias() is for self-reported MTK strings
+    plan.guessed[f.file_id] = "%s_%s.%s" % (n, f.file_id, e)
+    return plan.guessed[f.file_id]
 
 
 # ── pulling ─────────────────────────────────────────────────────────────────
@@ -183,21 +222,40 @@ def pull_one(plan: PullPlan, f: FileEntry, outdir: str,
     """Pull a single partition to disk (decrypt header, or stream body)."""
     info = plan.info
     bs = plan.sizes.get(f.file_id, -1)
-    is_small = bs <= 0
+    if bs < 0:
+        # The probe failed (timeout / DNS / 5xx). It is NOT the same as an empty
+        # body, and treating it as one would silently decrypt this partition's
+        # encrypted header and write that out as the image. Re-probe once, then
+        # give up rather than guess.
+        bs = fota.body_size(info.slave, f.rel_url) if info.slave else 0
+        plan.sizes[f.file_id] = bs
+        if bs < 0:
+            return PartResult(f.file_id, "?", "skip",
+                              error="body size probe failed - not pulled")
+    is_small = bs == 0
     name = _resolve_name(plan, f, is_small)
     if not name:
         return PartResult(f.file_id, "?", "skip", error="no name / empty")
 
+    # Reserve the destination so two files can never share one path: the .sca
+    # join is not injective, and a shared path means a resumed body appends
+    # itself onto the previous image.
+    name, collided = plan.claim(name, f.file_id)
     dest = os.path.join(outdir, name)
+    # Stage under the FILE_ID so a resume can only ever continue its own bytes,
+    # and a half-finished pull never looks like a flashable image.
+    part = os.path.join(outdir, ".%s.part" % f.file_id)
     try:
         if is_small:
             enc = fota.fetch_header(info.encslave, f.rel_url)
             if len(enc) < 16:
                 return PartResult(f.file_id, name, "header", error="empty header")
             img = decrypt_header(enc)
-            with open(dest, "wb") as fh:
+            with open(part, "wb") as fh:
                 fh.write(img)
-            res = PartResult(f.file_id, name, "header", size=len(img), path=dest)
+            os.replace(part, dest)
+            res = PartResult(f.file_id, name, "header", size=len(img), path=dest,
+                             collided=collided)
         else:
             head = plan.heads.get(f.file_id)
             if head is None and info.slave:
@@ -206,16 +264,27 @@ def pull_one(plan: PullPlan, f: FileEntry, outdir: str,
             if wrapped:
                 # zip -> .mbn -> image: inflate in-flight so the container never
                 # lands on disk, and verify the checksum of the bytes as served.
+                want = int(wrapped[2].get("size") or 0)
+                if want and os.path.exists(dest) and os.path.getsize(dest) == want:
+                    return PartResult(f.file_id, name, "body", size=want,
+                                      path=dest, collided=collided)
                 got, body_sha, _raw = stream_unwrap(
-                    info.slave, f.rel_url, dest, wrapped[2], on_progress)
-                res = PartResult(f.file_id, name, "body", size=got, path=dest)
+                    info.slave, f.rel_url, part, wrapped[2], on_progress)
+                os.replace(part, dest)
+                res = PartResult(f.file_id, name, "body", size=got, path=dest,
+                                 collided=collided)
                 if verify and info.encslave:
                     cs = fetch_checksums(info.encslave, f.rel_url)
                     if cs and cs.body:
                         res.verified = (body_sha == cs.body.lower())
             else:
-                got = stream_body(info.slave, f.rel_url, dest, on_progress)
-                res = PartResult(f.file_id, name, "body", size=got, path=dest)
+                if os.path.exists(dest) and os.path.getsize(dest) == bs:
+                    got = bs                       # already complete from an
+                else:                              # earlier run
+                    got = stream_body(info.slave, f.rel_url, part, on_progress)
+                    os.replace(part, dest)
+                res = PartResult(f.file_id, name, "body", size=got, path=dest,
+                                 collided=collided)
                 if verify and info.encslave:
                     cs = fetch_checksums(info.encslave, f.rel_url)
                     if cs and cs.body:
@@ -230,12 +299,15 @@ def write_manifest(curef: str, plan: PullPlan, results: list[PartResult],
     info = plan.info
     doc = {
         "curef": curef, "tv": info.tv, "fw_id": info.fw_id,
-        "generated_by": "tcl-fw 4.0",
+        "generated_by": "tcl-fw 4.3.1",
         "credit": "header decryption by Littlenine Ennea (github.com/LittlenineEnnea)",
         "slave": info.slave, "encslave": info.encslave,
         "files": [
             {"file_id": r.file_id, "name": r.name, "kind": r.kind,
-             "size": r.size, "verified": r.verified, "error": r.error}
+             "size": r.size, "verified": r.verified, "error": r.error,
+             # True == another file claimed this name first, so this one was
+             # suffixed with its FILE_ID. At most one of the pair is genuine.
+             "collided": r.collided}
             for r in results
         ],
     }

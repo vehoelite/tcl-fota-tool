@@ -507,7 +507,7 @@ class MainWindow(QMainWindow):
         self._info = info
         self._plan = plan
         known = devices.lookup(curef)
-        small = sum(1 for f in info.files if plan.sizes.get(f.file_id, -1) <= 0)
+        small = sum(1 for f in info.files if plan.sizes.get(f.file_id, -1) == 0)
         self.info_lbl.setText(
             f"{curef}   tv={info.tv}  fw_id={info.fw_id}   ·   "
             f"{len(info.files)} parts ({small} small / {len(info.files)-small} body)"
@@ -527,9 +527,10 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(len(ordered))
         for row, f in enumerate(ordered):
             bs = plan.sizes.get(f.file_id, -1)
-            is_small = bs <= 0
-            name = plan.names.get(f.file_id) or (
-                "«in encrypted header»" if is_small else f"‹{f.file_id}›")
+            is_small = bs == 0                     # bs < 0 == the probe failed
+            name = plan.names.get(f.file_id) or plan.guessed.get(f.file_id) or (
+                "«in encrypted header»" if is_small
+                else "«probe failed»" if bs < 0 else f"‹{f.file_id}›")
 
             sel = QTableWidgetItem()
             sel.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
@@ -541,7 +542,8 @@ class MainWindow(QMainWindow):
             size_item = QTableWidgetItem(human_size(bs))
             size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(row, C_SIZE, size_item)
-            src = QTableWidgetItem("header ⭑" if is_small else "body")
+            src = QTableWidgetItem("header ⭑" if is_small
+                                   else "?" if bs < 0 else "body")
             self.table.setItem(row, C_SRC, src)
 
             bar = QProgressBar()
@@ -568,9 +570,11 @@ class MainWindow(QMainWindow):
             self._name_worker.start()
 
     def _on_name_resolved(self, file_id: str, name: str) -> None:
-        # Cache on the plan so pull_one reuses it (no second probe), and show it.
+        # Cache on the plan so pull_one reuses it (no second probe), and show
+        # it. This goes in `guessed`, NOT `names`: `names` means "the server
+        # told us", and once a guess lands there nothing can tell them apart.
         if self._plan:
-            self._plan.names[file_id] = name
+            self._plan.guessed[file_id] = name
         row = self._row_of.get(file_id)
         if row is not None:
             self.table.item(row, C_NAME).setText(name)
@@ -580,7 +584,7 @@ class MainWindow(QMainWindow):
         needle = self.filter_edit.text().strip().lower()
         small_only = self.small_only.isChecked()
         for fid, row in self._row_of.items():
-            is_small = self._plan.sizes.get(fid, -1) <= 0 if self._plan else False
+            is_small = self._plan.sizes.get(fid, -1) == 0 if self._plan else False
             name = self.table.item(row, C_NAME).text().lower()
             hide = (small_only and not is_small) or (needle and needle not in name)
             self.table.setRowHidden(row, hide)

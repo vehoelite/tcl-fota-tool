@@ -160,14 +160,16 @@ def list_cmd(
     # Sort by real (probed) body size, largest first; header parts (size<=0) last.
     for f in sorted(info.files, key=lambda x: -(plan.sizes.get(x.file_id, -1))):
         bs = plan.sizes.get(f.file_id, -1)
-        is_small = bs <= 0
+        is_small = bs == 0                      # bs < 0 == the probe failed
         nm = plan.names.get(f.file_id)
         if not nm:
             nm = ("[in enc header]" if is_small
+                  else "[yellow]?[/]" if bs < 0
                   else naming.magic_name(fota.body_head(info.slave, f.rel_url,
                                                         n=puller.NAME_HEAD_BYTES))[0])
-        src = "[cyan]header[/]" if is_small else "body"
-        size = "[dim]—[/]" if is_small else f"{bs:,}"
+        src = ("[cyan]header[/]" if is_small
+               else "[yellow]probe failed[/]" if bs < 0 else "body")
+        size = "[dim]—[/]" if is_small else "[dim]?[/]" if bs < 0 else f"{bs:,}"
         table.add_row(nm, f.file_id, size, src)
     console.print(table)
     console.print("\n[dim]next:[/]  tcl-fw pull "
@@ -210,7 +212,7 @@ def pull(
     todo = []
     for f in info.files:
         bs = plan.sizes.get(f.file_id, -1)
-        is_small = bs <= 0
+        is_small = bs == 0                      # bs < 0 == the probe failed
         if small and not is_small:
             continue
         if want:
@@ -251,6 +253,26 @@ def pull(
     console.print(f"\n[green]✓[/] {ok}/{len(todo)} files → {out}/  "
                   f"[dim]({dec} decrypted from headers)[/]")
     console.print(f"[dim]manifest: {mpath}[/]")
+
+    # Never let a naming clash or a skipped file pass quietly: both mean the
+    # folder is not the clean 1:1 image of the device it looks like.
+    clash = [r for r in results if r.collided]
+    if clash:
+        console.print()
+        console.print(f"[yellow]![/] {len(clash)} file(s) resolved to a name "
+                      "another file already claimed, and were suffixed with "
+                      "their FILE_ID:")
+        for r in clash:
+            console.print(f"    [yellow]{r.name}[/]")
+        console.print("[dim]  At most one of each clashing pair is really that "
+                      "partition. Check both before flashing either.[/]")
+    skipped = [r for r in results if r.kind == "skip"]
+    if skipped:
+        console.print()
+        console.print(f"[yellow]![/] {len(skipped)} file(s) not pulled "
+                      "(the package is incomplete):")
+        for r in skipped:
+            console.print(f"    [yellow]{r.file_id}[/]  [dim]{r.error}[/]")
 
     if pack_after:
         console.print()

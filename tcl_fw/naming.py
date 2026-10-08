@@ -30,10 +30,20 @@ _ALIAS = {
 
 
 def alias(n: Optional[str]) -> str:
+    """Map a *self-reported* MTK header name to its conventional partition name.
+
+    Anchored at the front and at a separator, never a bare substring: an
+    unanchored `k in n` turned every name merely *containing* "atf" into "tee"
+    (alias("platform") == "tee"). The prefix form is still needed because the
+    GFH name field is truncated and versioned — "tinysys-scp-RV33_A" -> scp.
+
+    Only ever call this on names an image reports about itself. A .sca name, an
+    embedded-manifest name or an ext4 label is already the real partition name;
+    rewriting those loses information from the best evidence we have."""
     n = (n or "").lower()
-    for k, v in _ALIAS.items():
-        if n.startswith(k) or k in n:
-            return v
+    for k in sorted(_ALIAS, key=len, reverse=True):     # most specific wins
+        if n == k or n.startswith(k + "-") or n.startswith(k + "_"):
+            return _ALIAS[k]
     return n
 
 
@@ -215,7 +225,7 @@ def magic_name(b: bytes) -> tuple[str, str]:
         return "boot_or_vendorboot", "img"
     if b[:4] == SPARSE_MAGIC:
         hit = fs_label(unsparse_head(b))
-        return (alias(hit[0]) if hit else "sparse"), "img"
+        return (hit[0] if hit else "sparse"), "img"   # a label is already real
     if b[:4] == b"PK\x03\x04":
         wrapped = zip_wrapped_image(b)
         if wrapped:                   # zip-wrapped partition: name it by content
@@ -260,7 +270,7 @@ def identify(data: bytes, size: int) -> Identity:
         if hit:
             name, fam = hit
             named = name not in ("ext4", "erofs")   # a real label, not just the fs
-            return Identity(alias(name), size, fam, 0.9 if named else 0.4)
+            return Identity(name, size, fam, 0.9 if named else 0.4)
         return Identity("sparse", size, "sparse", 0.3)
     if d[:5] == b"<?xml":
         return Identity("scatter", size, "xml", 1.0)

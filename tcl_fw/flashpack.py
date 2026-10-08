@@ -35,6 +35,7 @@ class Probe:
     family: str
     cname: str              # content-derived name (may be a guess)
     label: Optional[str]
+    hdr: bytes = b""        # first 4 KiB, for header-field classification
 
 
 @dataclass
@@ -84,7 +85,8 @@ def probe_file(path: str) -> Probe:
     if fam == "erofs" or (fam == "zero" and head[1024:1028] == b"\xe2\xe1\xf5\xe0"):
         fam = "erofs"
     return Probe(path=path, fname=os.path.basename(path), size=size,
-                 family=fam, cname=ident.name, label=label or None)
+                 family=fam, cname=ident.name, label=label or None,
+                 hdr=head[:4096])
 
 
 def _probe_dir(pkgdir: str) -> list[Probe]:
@@ -97,6 +99,32 @@ def _probe_dir(pkgdir: str) -> list[Probe]:
             continue                                  # config/scatter, not a partition
         probes.append(probe_file(p))
     return probes
+
+
+def _boot_kind(hdr: bytes) -> tuple[Optional[str], float]:
+    """Classify an ANDROID! boot image from its header fields, or (None, 0).
+
+    Sorting by size and calling the larger one `boot` is wrong on the non-A/B
+    devices that dominate TCL's MTK line: `init_boot` only exists on Android 13+
+    GKI, so a second ANDROID! blob there is usually `recovery` — and recovery is
+    typically the *larger* of the two. That rule renamed recovery.img to
+    boot.img at a confidence above the rename threshold.
+
+    Fields (little-endian, boot_img_hdr): kernel_size u32 @8, header_version
+    u32 @40, recovery_dtbo_size u32 @1632 (v1/v2 only, non-zero only in a
+    non-A/B recovery image)."""
+    if hdr[:8] != b"ANDROID!" or len(hdr) < 44:
+        return None, 0.0
+    kernel_size = struct.unpack_from("<I", hdr, 8)[0]
+    ver = struct.unpack_from("<I", hdr, 40)[0]
+    if ver >= 3:                       # GKI: init_boot is the one with no kernel
+        return ("init_boot", 0.95) if kernel_size == 0 else ("boot", 0.9)
+    if 1 <= ver <= 2 and len(hdr) >= 1636:
+        if struct.unpack_from("<I", hdr, 1632)[0]:      # recovery_dtbo_size
+            return "recovery", 0.9
+    # v0, or v1/v2 with no recovery_dtbo: boot and recovery are genuinely
+    # indistinguishable from the header alone. Say so rather than guess.
+    return None, 0.0
 
 
 # ── partition index ───────────────────────────────────────────────────────────
@@ -195,18 +223,23 @@ def resolve(doc: ScatterDoc, probes: list[Probe]) -> tuple[list[Match], list[Pro
         elif prb.cname.startswith("part_504b0304"):        # PK zip
             cand, how = find_key("otapkg"), "zip->otapkg"
         elif prb.label:
-            cand, how = find_key(naming.alias(prb.label)), "fs-label"
+            cand, how = find_key(prb.label.lower()), "fs-label"
         if cand:
             take(prb, cand, 1.0, how)
 
-    # Pass 2 — boot family (ANDROID!): boot vs init_boot by size (larger = boot).
+    # Pass 2 — boot family (ANDROID!): classify by header fields, never by size.
     androids = [p for p in remaining if p.family == "android"]
-    if androids:
-        androids.sort(key=lambda x: -x.size)
-        for prb, key in zip(androids, ("boot", "init_boot")):
-            c = find_key(key)
-            if c:
-                take(prb, c, 0.9, "android-size")
+    for prb in sorted(androids, key=lambda x: -x.size):
+        kind, conf = _boot_kind(prb.hdr)
+        if kind is None and len(androids) == 1 and find_key("boot"):
+            # A lone ANDROID! blob against a scatter that names boot: there is
+            # no other boot-family partition for it to be.
+            kind, conf = "boot", 0.8
+        c = find_key(kind) if kind else None
+        if c:
+            take(prb, c, conf, "android-header")
+        # An unclassified boot/recovery pair falls through to Pass 4's size-fit,
+        # which assigns below the rename threshold so a human has to look.
 
     # Pass 3 — vbmeta (AVB0): split by descriptor contents, else by size.
     avbs = [p for p in remaining if p.family == "avb"]
