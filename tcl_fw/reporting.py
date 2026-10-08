@@ -166,8 +166,13 @@ def send(payload: dict, block: bool = False) -> bool:
     if block:                      # used from an excepthook, where the process
         _post(url, payload)        # is about to exit and a daemon would die
     else:
-        threading.Thread(target=_post, args=(url, payload), daemon=True).start()
+        _spawn(url, payload)
     return True
+
+
+def _spawn(url: str, payload: dict) -> None:
+    """Send on a daemon thread (own seam, so tests never patch threading)."""
+    threading.Thread(target=_post, args=(url, payload), daemon=True).start()
 
 
 def report_pull(results: list, curef: str = "", tv: Optional[str] = None,

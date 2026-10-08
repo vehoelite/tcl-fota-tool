@@ -23,16 +23,11 @@ def sent(monkeypatch, tmp_path):
     monkeypatch.setenv("TCL_FW_SHARE_URL", "http://registry.test")
     monkeypatch.setattr(reporting, "_sent", 0)
     out = []
-    monkeypatch.setattr(reporting, "_post", lambda url, payload: out.append((url, payload)))
-
-    class SyncThread:                    # run the daemon thread inline
-        def __init__(self, target, args=(), daemon=None):
-            self.t, self.a = target, args
-
-        def start(self):
-            self.t(*self.a)
-
-    monkeypatch.setattr(reporting.threading, "Thread", SyncThread)
+    capture = lambda url, payload: out.append((url, payload))  # noqa: E731
+    monkeypatch.setattr(reporting, "_post", capture)
+    # Send inline instead of on a daemon thread. Patch reporting's own seam -
+    # never threading.Thread, which is global and would affect other tests.
+    monkeypatch.setattr(reporting, "_spawn", capture)
     return out
 
 
