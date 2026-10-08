@@ -244,7 +244,7 @@ def pull(
                 console.print(f"  [red]![/] {r.name}  ({r.error})")
             else:
                 tag = ("DEC " if r.kind == "header" else "BODY")
-                vmark = "" if r.verified is None else (" [green]✓[/]" if r.verified else " [red]✗ checksum[/]")
+                vmark = " [green]✓[/]" if r.verified else " [yellow]unverified[/]"
                 console.print(f"  [dim]{tag}[/] {r.name}  [dim]{r.size:,} B[/]{vmark}")
 
     mpath = puller.write_manifest(curef, plan, results, out)
@@ -253,6 +253,20 @@ def pull(
     console.print(f"\n[green]✓[/] {ok}/{len(todo)} files → {out}/  "
                   f"[dim]({dec} decrypted from headers)[/]")
     console.print(f"[dim]manifest: {mpath}[/]")
+
+    # Say plainly what was and was not proven against the server checksums.
+    good = [r for r in results if not r.error]
+    unver = [r for r in good if r.verified is None]
+    if good and not unver:
+        console.print(f"[green]all {len(good)} image(s) verified byte-for-byte against TCL's checksums[/]")
+    elif unver:
+        console.print()
+        console.print(f"[yellow]![/] {len(unver)} image(s) could NOT be verified "
+                      "(no server checksum, or --no-verify):")
+        for r in unver:
+            console.print(f"    [yellow]{r.name}[/]")
+        console.print("[dim]  They may be correct, but nothing proved it. Do not flash an "
+                      "unverified image you cannot check another way.[/]")
 
     # Never let a naming clash or a skipped file pass quietly: both mean the
     # folder is not the clean 1:1 image of the device it looks like.

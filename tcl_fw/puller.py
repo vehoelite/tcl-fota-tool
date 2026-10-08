@@ -2,10 +2,11 @@
 puller.py — orchestrates a full service-package pull.
 
 The per-file model (from Littlenine's tcl-fw.py), decided by body size:
-  * empty body (HTTP 416 / size 0)  -> SMALL partition: the real image is the
-    decrypted 4 MiB encrypted header.
-  * non-empty body                  -> LARGE partition: the plaintext body IS
-    the image; stream it.
+  * every partition's image is  body || unpad(decrypt(header blob)).
+  * empty body (HTTP 416 / size 0)  -> SMALL partition: the image is just the
+    decrypted header blob.
+  * non-empty body                  -> LARGE partition: stream the body, then
+    append the decrypted blob, which is the image's final 4 MiB (#15).
 
 Naming is server-authoritative when possible (check_new manifest + .sca scatter),
 falling back to content-magic identification. Output lands in <outdir>/, and a
@@ -14,6 +15,7 @@ manifest.json records what was pulled.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -246,52 +248,135 @@ def pull_one(plan: PullPlan, f: FileEntry, outdir: str,
     # and a half-finished pull never looks like a flashable image.
     part = os.path.join(outdir, ".%s.part" % f.file_id)
     try:
-        if is_small:
-            enc = fota.fetch_header(info.encslave, f.rel_url)
-            if len(enc) < 16:
-                return PartResult(f.file_id, name, "header", error="empty header")
-            img = decrypt_header(enc)
-            with open(part, "wb") as fh:
-                fh.write(img)
-            os.replace(part, dest)
-            res = PartResult(f.file_id, name, "header", size=len(img), path=dest,
-                             collided=collided)
-        else:
-            head = plan.heads.get(f.file_id)
-            if head is None and info.slave:
-                head = fota.body_head(info.slave, f.rel_url, n=NAME_HEAD_BYTES)
-            wrapped = naming.zip_wrapped_image(head) if head else None
-            if wrapped:
-                # zip -> .mbn -> image: inflate in-flight so the container never
-                # lands on disk, and verify the checksum of the bytes as served.
-                want = int(wrapped[2].get("size") or 0)
-                if want and os.path.exists(dest) and os.path.getsize(dest) == want:
-                    return PartResult(f.file_id, name, "body", size=want,
-                                      path=dest, collided=collided)
-                got, body_sha, _raw = stream_unwrap(
-                    info.slave, f.rel_url, part, wrapped[2], on_progress)
-                os.replace(part, dest)
-                res = PartResult(f.file_id, name, "body", size=got, path=dest,
-                                 collided=collided)
-                if verify and info.encslave:
-                    cs = fetch_checksums(info.encslave, f.rel_url)
-                    if cs and cs.body:
-                        res.verified = (body_sha == cs.body.lower())
-            else:
-                if os.path.exists(dest) and os.path.getsize(dest) == bs:
-                    got = bs                       # already complete from an
-                else:                              # earlier run
-                    got = stream_body(info.slave, f.rel_url, part, on_progress)
-                    os.replace(part, dest)
-                res = PartResult(f.file_id, name, "body", size=got, path=dest,
-                                 collided=collided)
-                if verify and info.encslave:
-                    cs = fetch_checksums(info.encslave, f.rel_url)
-                    if cs and cs.body:
-                        res.verified = (sha1_file(dest) == cs.body.lower())
-        return res
+        return _pull_image(plan, f, bs, name, dest, part, collided,
+                           on_progress, verify)
     except Exception as e:
-        return PartResult(f.file_id, name, "small" if is_small else "body", error=str(e))
+        return PartResult(f.file_id, name, "header" if is_small else "body",
+                          error=str(e), collided=collided)
+
+
+def _sha1(b: bytes) -> str:
+    return hashlib.sha1(b).hexdigest()
+
+
+def _discard(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _pull_image(plan: PullPlan, f: FileEntry, bs: int, name: str, dest: str,
+                part: str, collided: bool,
+                on_progress: Optional[Callable[[int, int], None]],
+                verify: bool) -> PartResult:
+    """One model for every partition:  image = body || unpad(decrypt(header)).
+
+    A small partition has an empty body, so its image is the decrypted header
+    blob. A large one streams its body and the blob supplies the final 4 MiB
+    (#15) - without it every large image was exactly 4 MiB short and sparse
+    images failed simg2img.
+
+    checksum.php covers every byte: BODY is the SHA-1 of the body, FOOTER of
+    the decrypted, unpadded blob. Both are checked whenever the server provides
+    them; a mismatch deletes the staged file and returns an error, so nothing
+    unverified-and-wrong ever lands under a flashable name.
+    """
+    info = plan.info
+    is_small = bs == 0
+    kind = "header" if is_small else "body"
+
+    def fail(msg: str) -> PartResult:
+        _discard(part)
+        return PartResult(f.file_id, name, kind, error=msg, verified=False,
+                          collided=collided)
+
+    cs = fetch_checksums(info.encslave, f.rel_url) if (verify and info.encslave) else None
+
+    # The header blob first: it is at most ~4 MiB, so a bad one is caught before
+    # a multi-GB body is downloaded.
+    enc = fota.fetch_header(info.encslave, f.rel_url) if info.encslave else b""
+    if len(enc) >= 16:
+        try:
+            foot = decrypt_header(enc)
+        except ValueError as e:
+            return fail("header blob rejected: %s" % e)
+    else:
+        foot = b""
+    if is_small and not foot:
+        return fail("empty header")
+    if cs and cs.footer:
+        if not foot:
+            return fail("server lists a footer but none was returned")
+        if _sha1(foot) != cs.footer:
+            return fail("footer/header checksum mismatch")
+    elif not is_small and not foot:
+        # No checksum to say whether a footer exists, and none was served. The
+        # image may be complete or 4 MiB short; there is no way to tell.
+        pass
+    checked = bool(cs and cs.footer)                 # every byte so far proven
+
+    if is_small:
+        with open(part, "wb") as fh:
+            fh.write(foot)
+        os.replace(part, dest)
+        return PartResult(f.file_id, name, kind, size=len(foot), path=dest,
+                          verified=True if checked else None, collided=collided)
+
+    head = plan.heads.get(f.file_id)
+    if head is None and info.slave:
+        head = fota.body_head(info.slave, f.rel_url, n=NAME_HEAD_BYTES)
+    wrapped = naming.zip_wrapped_image(head) if head else None
+
+    if wrapped:
+        # zip -> .mbn -> image: inflate in-flight, the footer fed through the
+        # same inflater, so the container never lands on disk.
+        want = int(wrapped[2].get("size") or 0)
+        if 0 < want < 0xFFFFFFFF and os.path.exists(dest) \
+                and os.path.getsize(dest) == want:
+            # Complete from an earlier run. The served bytes are gone, so the
+            # body cannot be re-proven without re-downloading: say so.
+            return PartResult(f.file_id, name, kind, size=want, path=dest,
+                              verified=None, collided=collided)
+        got, body_sha, _raw = stream_unwrap(info.slave, f.rel_url, part,
+                                            wrapped[2], on_progress, tail=foot)
+        if cs and cs.body and body_sha != cs.body:
+            return fail("body checksum mismatch")
+        os.replace(part, dest)
+        ok = checked and bool(cs and cs.body)
+        return PartResult(f.file_id, name, kind, size=got, path=dest,
+                          verified=True if ok else None, collided=collided)
+
+    full = bs + len(foot)
+    # Already complete from an earlier run? Size alone is not enough: every
+    # short image 4.x wrote is exactly `bs` bytes, so match the full length and,
+    # when we can, re-prove both halves before trusting it.
+    if os.path.exists(dest) and os.path.getsize(dest) == full:
+        if not cs:
+            return PartResult(f.file_id, name, kind, size=full, path=dest,
+                              verified=None, collided=collided)
+        body_ok = not cs.body or sha1_file(dest, limit=bs) == cs.body
+        if body_ok:
+            with open(dest, "rb") as fh:
+                fh.seek(bs)
+                tail_ok = not foot or fh.read() == foot
+            if tail_ok:
+                return PartResult(f.file_id, name, kind, size=full, path=dest,
+                                  verified=True if (cs.body and checked) else None,
+                                  collided=collided)
+        # Present but wrong (e.g. a short 4.x image): pull it again.
+
+    got = stream_body(info.slave, f.rel_url, part, on_progress)
+    if got != bs:
+        return fail("body is %d bytes, expected %d (download incomplete)" % (got, bs))
+    if cs and cs.body and sha1_file(part) != cs.body:
+        return fail("body checksum mismatch")
+    with open(part, "ab") as fh:
+        fh.write(foot)
+    os.replace(part, dest)
+    ok = checked and bool(cs and cs.body)
+    return PartResult(f.file_id, name, kind, size=got + len(foot), path=dest,
+                      verified=True if ok else None, collided=collided)
 
 
 def write_manifest(curef: str, plan: PullPlan, results: list[PartResult],
@@ -299,7 +384,7 @@ def write_manifest(curef: str, plan: PullPlan, results: list[PartResult],
     info = plan.info
     doc = {
         "curef": curef, "tv": info.tv, "fw_id": info.fw_id,
-        "generated_by": "tcl-fw 4.3.1",
+        "generated_by": "tcl-fw 4.4.0",
         "credit": "header decryption by Littlenine Ennea (github.com/LittlenineEnnea)",
         "slave": info.slave, "encslave": info.encslave,
         "files": [

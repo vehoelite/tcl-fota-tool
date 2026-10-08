@@ -14,15 +14,14 @@ UNIVERSAL key shared by every TCL MediaTek model:
   * "TeleExtTest" / "t0523"  — the encrypt_header.php service account / password.
   * "jP7GHdmuBz"             — seed recovered from sugar_otu_r.dll.
 
-Verified: the header's trailing padding decrypts to a constant filler block, and the
-image itself decrypts to real magics — vbmeta -> "AVB0", MTK GFH -> 88 16 88 58,
+Verified: the plaintext is standard PKCS#7-padded, and the image itself decrypts to
+real magics — vbmeta -> "AVB0", MTK GFH -> 88 16 88 58,
 sparse ext4 -> 3a ff 26 ed, ELF -> 7f 45 4c 46, scatter -> "<?xml".
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections import Counter
 
 from Crypto.Cipher import AES
 
@@ -41,35 +40,31 @@ BLOCK = 16
 
 
 def decrypt_header(enc: bytes) -> bytes:
-    """Decrypt a raw encrypted-header blob into its clean image bytes.
+    """Decrypt a raw encrypted-header blob into its exact image bytes.
 
-    The blob is AES-128-ECB over the whole (16-aligned) length. It is padded to
-    ~4 MiB with a constant filler block, so rather than assume a pad byte we:
-      1. ECB-decrypt everything,
-      2. find the dominant *ciphertext* block (the repeated filler),
-      3. decrypt that one block to learn the pad, and
-      4. trim every trailing copy of it.
+    The blob is AES-128-ECB over standard PKCS#7-padded plaintext: the last
+    plaintext byte N (1..16) says how many trailing bytes are padding, and all N
+    of them equal N. That is verified against TCL's own checksum.php, whose
+    FOOTER value is the SHA-1 of exactly these unpadded bytes (#16).
 
-    Returns the exact image with padding removed. Raises ValueError if the blob
-    is too short to contain a single AES block.
+    For a small partition the result is the whole image; for a large one it is
+    the 4 MiB footer that completes the streamed body (#15).
+
+    Raises ValueError if the blob is not whole AES blocks or the padding is not
+    valid PKCS#7 — that means a wrong key or a corrupt/error response, and
+    guessing where the image ends is how wrong bytes reach a flash tool.
     """
     if enc is None or len(enc) < BLOCK:
         raise ValueError(f"header blob too short: {0 if enc is None else len(enc)} bytes")
+    if len(enc) % BLOCK:
+        raise ValueError(f"header blob is not whole AES blocks: {len(enc)} bytes")
 
-    n = len(enc) - (len(enc) % BLOCK)
-    cipher = AES.new(KEY, AES.MODE_ECB)
-    dec = cipher.decrypt(enc[:n])
-
-    # Dominant ciphertext block == the repeated padding filler. Decrypt it once.
-    dom_ct = Counter(
-        enc[i:i + BLOCK] for i in range(0, n, BLOCK)
-    ).most_common(1)[0][0]
-    pad = AES.new(KEY, AES.MODE_ECB).decrypt(dom_ct)
-
-    end = len(dec)
-    while end >= BLOCK and dec[end - BLOCK:end] == pad:
-        end -= BLOCK
-    return dec[:end]
+    dec = AES.new(KEY, AES.MODE_ECB).decrypt(enc)
+    n = dec[-1]
+    if not 1 <= n <= BLOCK or dec[-n:] != bytes([n]) * n:
+        raise ValueError("header blob has invalid PKCS#7 padding "
+                         "(wrong key, or not a header blob)")
+    return dec[:-n]
 
 
 def key_hex() -> str:

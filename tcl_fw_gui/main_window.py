@@ -680,17 +680,15 @@ class MainWindow(QMainWindow):
                 if res.error:
                     bar.setValue(0)
                     bar.setFormat("error")
-                elif res.verified is False:
-                    bar.setValue(100)
-                    bar.setFormat("✓ (bad SHA)")
                 else:
                     bar.setValue(100)
-                    bar.setFormat("done ✓" if res.verified else "done")
+                    # verified=None means nothing proved the bytes: say so.
+                    bar.setFormat("done ✓" if res.verified else "done · unverified")
         tag = "DEC " if res.kind == "header" else "BODY"
         if res.error:
             self._log(f"  ✗ {res.name}: {res.error}")
         else:
-            v = "" if res.verified is None else (" ✓" if res.verified else " ✗SHA")
+            v = " ✓" if res.verified else "  (unverified)"
             self._log(f"  {tag} {res.name}  {res.size:,} B{v}")
 
     def _on_pull_finished(self, results: list, mpath: str) -> None:
@@ -704,6 +702,30 @@ class MainWindow(QMainWindow):
         self._status(f"Done — {ok}/{len(results)} parts written ({dec} decrypted). "
                      f"manifest.json saved.")
         self._log(f"Finished: {ok}/{len(results)} OK, {dec} decrypted. Manifest: {mpath}")
+        # Never let a failure, a name clash, or an unproven image pass quietly.
+        good = [r for r in results if not r.error]
+        unver = [r for r in good if r.verified is None]
+        bad = [r for r in results if r.error]
+        clash = [r for r in results if getattr(r, "collided", False)]
+        if good and not unver:
+            self._log(f"  All {len(good)} images verified byte-for-byte against TCL's checksums.")
+        notes = []
+        if bad:
+            notes.append(f"{len(bad)} part(s) failed or were rejected - the package is "
+                         "incomplete:\n  " + "\n  ".join(f"{r.name}: {r.error}" for r in bad))
+        if unver:
+            notes.append(f"{len(unver)} image(s) could not be verified against the "
+                         "server's checksums:\n  " + "\n  ".join(r.name for r in unver)
+                         + "\nThey may be correct, but nothing proved it.")
+        if clash:
+            notes.append(f"{len(clash)} file(s) resolved to a name another file already "
+                         "claimed and were suffixed with their FILE_ID:\n  "
+                         + "\n  ".join(r.name for r in clash)
+                         + "\nAt most one of each pair is really that partition.")
+        if notes:
+            for n in notes:
+                self._log("  ! " + n.replace("\n", "\n    "))
+            QMessageBox.warning(self, "Check before flashing", "\n\n".join(notes))
 
     def _on_pull_failed(self, msg: str) -> None:
         self._set_busy(False)
