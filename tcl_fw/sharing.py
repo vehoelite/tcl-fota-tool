@@ -1,6 +1,7 @@
 """
 sharing.py — optional, opt-out reporting of the (curef, fv) identifiers this
-tool looks up, so the community device list grows by itself.
+tool looks up, so the community device list grows by itself. The same toggle
+covers anonymous error reports (see reporting.py).
 
 Design principles:
   * Transparent: a plain-language notice is printed on first run (never hidden).
@@ -38,19 +39,34 @@ API_KEY = "us4zI1xHemiIo499wgrfX_6q_7Okky5o"
 
 _TIMEOUT = 4  # seconds; submission must never hang the tool
 
+#: Bump when what is shared changes, so existing users see the notice again.
+#: 1 = device IDs; 2 = + anonymous error reports (4.5.0).
+NOTICE_VERSION = 2
+
 NOTICE = """\
 =====================================================================
-  tcl-fw can share the device IDs it looks up (curef + firmware
-  version) with a community registry, so the built-in device list
-  grows automatically for everyone.
+  tcl-fw shares two things with a public community registry, so the
+  tool gets better for everyone:
 
-  Shared:   curef, firmware version, mode, resolved build, the device
-            model name (a read-only build property - the same on every
-            unit of that model), and the tcl-fw version.
+  1. Device IDs it looks up - curef, firmware version, mode, resolved
+     build, the device model name (a read-only build property, the
+     same on every unit of that model), and the tcl-fw version.
+     This grows the built-in device list automatically.
+
+  2. NEW: anonymous error reports - when a pull fails, a checksum
+     doesn't match, or the tool crashes: an error code, the error
+     type (e.g. PermissionError), where in tcl-fw it happened
+     (module:function:line), the tcl-fw / Python / OS-family version,
+     and the device IDs above. Never the error message, file paths,
+     folder names or your username. This lets bugs get fixed between
+     the maintainer's (occasional) working sessions instead of
+     lingering for weeks.
+
   NOT shared: no IMEI or serial, no IP, no account, no personal name,
-            no location - nothing identifying you or your handset.
+  no location, no file paths - nothing identifying you or your handset.
+  Everything recorded is public: <server>/api/curefs and /api/errors.
 
-  This is ON by default. Turn it off any time:   tcl-fw sharing --off
+  This is ON by default. Turn both off any time:  tcl-fw sharing --off
   See exactly what's recorded and why:            tcl-fw sharing
 ====================================================================="""
 
@@ -101,6 +117,7 @@ def set_enabled(value: bool) -> None:
     s = cfg.setdefault("sharing", {})
     s["enabled"] = bool(value)
     s["notice_shown"] = True  # choosing is itself acknowledgement
+    s["notice_version"] = NOTICE_VERSION
     _save(cfg)
 
 
@@ -111,13 +128,18 @@ def server_url() -> str:
 
 
 def notice_pending() -> bool:
-    """True if the first-run notice hasn't been shown yet."""
-    return not _load().get("sharing", {}).get("notice_shown", False)
+    """True if the current notice hasn't been shown yet - including to someone
+    who saw an older notice before what's shared changed."""
+    s = _load().get("sharing", {})
+    seen = s.get("notice_version", 1 if s.get("notice_shown") else 0)
+    return int(seen or 0) < NOTICE_VERSION
 
 
 def mark_notice_shown() -> None:
     cfg = _load()
-    cfg.setdefault("sharing", {})["notice_shown"] = True
+    s = cfg.setdefault("sharing", {})
+    s["notice_shown"] = True
+    s["notice_version"] = NOTICE_VERSION
     _save(cfg)
 
 
@@ -204,7 +226,7 @@ def status_text() -> str:
     """Human-readable status for `tcl-fw sharing`."""
     on = is_enabled()
     return (
-        f"Community device sharing is {'ON' if on else 'OFF'}.\n\n"
+        f"Community sharing is {'ON' if on else 'OFF'} (device IDs + error reports).\n\n"
         "When ON, after a lookup tcl-fw reports the device identifiers it used\n"
         "so the built-in device list grows for everyone:\n"
         "  shared:      curef, firmware version (fv), mode, resolved tv/fw_id,\n"
@@ -212,11 +234,16 @@ def status_text() -> str:
         "               the read-only build props - identical on every unit of\n"
         "               that model, so it names the model, not your phone,\n"
         "               tcl-fw version\n"
+        "  errors:      when something fails: an error code, the error type\n"
+        "               (e.g. PermissionError), where in tcl-fw it happened\n"
+        "               (module:function:line), tcl-fw/Python/OS-family version\n"
+        "               and the device IDs above. NEVER the error message, file\n"
+        "               paths, folder names or your username.\n"
         "  NOT shared:  IMEI or serial (the protocol uses a fixed placeholder),\n"
         "               IP address, account, your name, location - nothing that\n"
         "               identifies you or your individual handset.\n\n"
         f"  server:      {server_url() or '(none configured)'}\n"
         f"  config:      {_config_file()}\n\n"
-        "Read what's recorded (public):  <server>/about  and  <server>/api/curefs\n"
+        "Read what's recorded (public):  <server>/about, /api/curefs, /api/errors\n"
         "Turn it off:  tcl-fw sharing --off      Turn it on:  tcl-fw sharing --on"
     )

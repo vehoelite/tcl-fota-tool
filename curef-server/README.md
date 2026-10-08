@@ -26,15 +26,36 @@ addresses, accounts, personal names, locations, or user-set device nicknames.
 The `name` field above is a *model* name, not a per-handset one. Reads are
 public so anyone can audit what's held.
 
+### Error reports (tcl-fw 4.5.0+)
+
+Kept in a separate store (`errors.json` / `errors.jsonl`), grouped by
+`(tool_version, code, exc_type, top stack frame)`:
+
+| field | example | notes |
+|-------|---------|-------|
+| `code` | `body_checksum_mismatch` | from a fixed allowlist; anything else is rejected |
+| `exc_type`, `errno` | `PermissionError`, `13` | must match `^[A-Za-z_][A-Za-z0-9_]{0,63}$` |
+| `stack` | `tcl_fw.puller:pull_one:250` | frames must match `tcl_fw(_gui).<module>:<func>:<line>`; others dropped |
+| `tool_version`, `python`, `pyside`, `os` | `4.5.0`, `3.12`, `6.11.2`, `Windows` | `os` is one of Windows/Linux/Darwin/Other |
+| `command` | `pull` | pull / list / pack / verify / gui / other |
+| `curefs` | `["T611B-2ALCGB12"]` | devices affected (capped at 50 per group) |
+| `count`, `reports`, `first_seen`, `last_seen` | | aggregation |
+
+There is **no free-text field**. The server copies only the fields above out of
+a request and discards the rest, so a crafted POST cannot put a message, path
+or name into the store. The client never sends exception messages.
+
 ## Endpoints
 
 | method | path | auth | purpose |
 |--------|------|------|---------|
 | POST | `/api/curef` | `x-tcl-key` header | record a `{curef, fv, mode, tv, fw_id, size, svn, tool_version}` |
+| POST | `/api/error` | `x-tcl-key` header | record an anonymous error report (see above) |
+| GET | `/api/errors?version=` | public | error groups, newest first (optionally one tool version) |
 | POST | `/api/revalidate` | `x-tcl-key` header | trigger a re-validation pass now (runs in background) |
 | GET | `/api/curefs?limit=&offset=` | public | list records (newest first) |
 | GET | `/api/templates` | public | validated records reshaped as per-device release history — the feed `tcl-fw sync` merges to auto-grow its device list |
-| GET | `/api/stats` | public | `{devices, combos, total, updated}` |
+| GET | `/api/stats` | public | `{devices, combos, total, updated, errors: {groups, reports, updated}}` |
 | GET | `/about` (or `/`) | public | plain-language description |
 | GET | `/healthz` | public | liveness |
 

@@ -19,6 +19,16 @@ Works on TCL-made Android devices (TCL, REVVL, Alcatel).
 
 ---
 
+## What's new in 4.5.0 — bugs report themselves
+
+* **Anonymous error reports**, under the same opt-out switch as device sharing
+  and published in full — see [what's sent and what never is](#anonymous-error-reports-same-switch).
+  The goal: a bug like 4.x's missing footer (#15) gets noticed in days, not
+  weeks, even when nobody is actively working on the tool.
+* The sharing notice is shown once more to existing users so the change is
+  disclosed, and the desktop app's notice now lists everything that is shared
+  (it had not mentioned the device model name).
+
 ## What's new in 4.4.0 — byte-exact images
 
 **Every large-partition image pulled with 4.x was incomplete. Re-pull with
@@ -158,7 +168,7 @@ adb shell getprop ro.tct.curef
 | `tcl-fw sharing [--on\|--off]` | Show or change community device-ID sharing (opt-out, nothing personal). |
 | `tcl-fw verify <file>` | Verify an APK / signed package's signature, or inspect the signing certificates inside a firmware blob. `--against <cert>` for a strict identity check. Needs `pip install "tcl-fw[verify]"`. |
 
-## Community device database (opt-out)
+## Community device database & error reports (opt-out)
 
 `tcl-fw` can only auto-fill a device it knows about, so it grows its own list.
 When a lookup succeeds, the tool reports the device identifiers it used to a
@@ -192,6 +202,37 @@ the same opt-out); `tcl-fw sync` pulls it on demand. Everything it learns shows
 up in **`tcl-fw devices`**, which marks each entry `built-in`, `bundled`, or
 `community` so you can see what the network taught your install. The registry is
 public — browse what's recorded at the server's `/about` and `/api/curefs`.
+
+### Anonymous error reports (same switch)
+
+`tcl-fw` is maintained in spare time — sometimes a session or two a month. So
+that a serious bug can't quietly ride along for weeks between those sessions,
+**the same opt-out switch also sends anonymous error reports**: when a pull
+fails, a checksum doesn't match, an image can't be verified, or the tool
+crashes. They are grouped by error and version and **published in full** at the
+server's `/api/errors`, so anyone can see what's broken and what's being fixed.
+
+A report contains exactly this, and nothing else:
+
+| field | example | why |
+|---|---|---|
+| `code` | `body_checksum_mismatch`, `cdn_404`, `unverified`, `exception` | what went wrong — a fixed list, never free text |
+| `exc_type`, `errno` | `PermissionError`, `13` | the kind of crash — the type's *name* only |
+| `stack` | `tcl_fw.puller:pull_one:250` | where in tcl-fw — `module:function:line`, tcl-fw's own code only |
+| `tool_version`, `python`, `pyside`, `os` | `4.5.0`, `3.12`, `6.11.2`, `Windows` | which builds are affected (OS *family* only) |
+| `command` | `pull` | which feature |
+| `curef`, `tv`, `fw_id`, `mode` | `T611B-2ALCGB12` | which device — the same IDs already shared above |
+
+**Never sent:** the error *message* (messages routinely contain file paths and
+your username), file paths, folder names, your username, command-line
+arguments, anything you typed. This isn't scrubbing — those fields simply don't
+exist in a report, the server discards anything outside the list above, and a
+test (`tests/test_reporting.py`) fails the build if a path or username ever
+reaches the wire. A pull sends at most one report (with counts), a clean pull
+sends nothing, and a process sends at most ten.
+
+Existing users see the updated notice once after upgrading.
+`tcl-fw sharing --off` turns off both device sharing and error reports.
 
 The server also **re-validates itself**: every ~12h it re-checks each known
 device against TCL and records the current build, so **new firmware releases

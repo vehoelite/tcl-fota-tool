@@ -11,6 +11,7 @@ Commands:
 from __future__ import annotations
 
 import os
+import sys
 from typing import Optional
 
 import typer
@@ -19,7 +20,8 @@ from rich.progress import (BarColumn, DownloadColumn, Progress, SpinnerColumn,
                            TextColumn, TransferSpeedColumn)
 from rich.table import Table
 
-from . import __version__, adb, devices, flashpack, fota, naming, puller, sharing, templates
+from . import (__version__, adb, devices, flashpack, fota, naming, puller, reporting,
+               sharing, templates)
 from .crypto import decrypt_header, key_hex
 
 app = typer.Typer(
@@ -53,7 +55,7 @@ def _root(
     """TCL FOTA firmware puller + .mbn header decryptor."""
     # First-run disclosure for community sharing — shown once, never hidden.
     if sharing.notice_pending():
-        console.print(sharing.NOTICE)
+        console.print(sharing.NOTICE.replace("<server>", sharing.server_url()))
         sharing.mark_notice_shown()
     templates.autosync_if_due()
 
@@ -263,6 +265,9 @@ def pull(
                 console.print(f"  [dim]{tag}[/] {r.name}  [dim]{r.size:,} B[/]{vmark}")
 
     mpath = puller.write_manifest(curef, plan, results, out)
+    # One anonymous report per pull if anything went wrong (codes + counts
+    # only; nothing is sent when every file verified cleanly).
+    reporting.report_pull(results, curef, tv, fw_id, mode)
     ok = sum(1 for r in results if not r.error)
     dec = sum(1 for r in results if r.kind == "header" and not r.error)
     console.print(f"\n[green]✓[/] {ok}/{len(todo)} files → {out}/  "
@@ -313,6 +318,7 @@ def _run_pack(outdir: str, dry_run: bool = False, min_conf: float = 0.7) -> None
     SP Flash Tool scatter.txt. Shared by `pack` and `pull --pack`."""
     result = flashpack.build(outdir)
     if not result:
+        reporting.report_code("pack_no_scatter", "pack")
         console.print("[yellow]No scatter found[/] in this folder — nothing to "
                       "pack. Pack reads the device's .sca (or MTK scatter XML); "
                       "pull it with the rest of the package, e.g. "
@@ -608,5 +614,19 @@ def verify_cmd(
         console.print("")
 
 
+def main() -> None:
+    """Console entry point: run the CLI, and report an unexpected crash (its
+    type and tcl-fw frames only - see reporting.py) before Typer prints it."""
+    try:
+        app()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception as e:  # noqa: BLE001
+        cmd = sys.argv[1] if len(sys.argv) > 1 else "other"
+        reporting.report_exception(e, cmd if cmd in reporting.COMMANDS else "other",
+                                   block=True)
+        raise
+
+
 if __name__ == "__main__":
-    app()
+    main()

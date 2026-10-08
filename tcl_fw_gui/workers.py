@@ -20,7 +20,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from tcl_fw import adb, devices, flashpack, fota, puller, sharing, templates
+from tcl_fw import adb, devices, flashpack, fota, puller, reporting, sharing, templates
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
 
@@ -134,6 +134,7 @@ class VerifyWorker(QThread):
                 out.append("")
             self.done.emit("\n".join(out).strip(), True)
         except Exception as e:
+            reporting.report_exception(e, "verify")   # type + tcl-fw frames only
             self.done.emit(f"verify failed: {e}", False)
 
 
@@ -156,6 +157,7 @@ class DetectWorker(QThread):
                 return
             self.found.emit(dev)
         except Exception as e:  # noqa: BLE001 — surface anything to the UI
+            reporting.report_exception(e, "gui")   # type + tcl-fw frames only
             self.failed.emit(str(e))
 
 
@@ -241,6 +243,7 @@ class LoadWorker(QThread):
             plan: PullPlan = puller.build_plan(curef, info, mode=self._mode)
             self.loaded.emit(curef, info, plan)
         except Exception as e:  # noqa: BLE001
+            reporting.report_exception(e, "list")   # type + tcl-fw frames only
             self.failed.emit(str(e))
 
 
@@ -305,6 +308,7 @@ class PackWorker(QThread):
         try:
             result = flashpack.build(self._dir)
             if not result:
+                reporting.report_code("pack_no_scatter", "pack")
                 self.failed.emit("No scatter in this folder. Make flashable reads "
                                  "the device's .sca (or MTK scatter XML) - pull it "
                                  "along with the images, then try again.")
@@ -312,6 +316,7 @@ class PackWorker(QThread):
             flashpack.apply(self._dir, result, min_confidence=self._conf)
             self.done.emit(result)
         except Exception as e:  # noqa: BLE001
+            reporting.report_exception(e, "pack")   # type + tcl-fw frames only
             self.failed.emit(str(e))
 
 
@@ -369,4 +374,5 @@ class PullWorker(QThread):
                 self._plan.info.curef, self._plan, results, self._outdir)
             self.finished_all.emit(results, mpath)
         except Exception as e:  # noqa: BLE001
+            reporting.report_exception(e, "pull")   # type + tcl-fw frames only
             self.failed.emit(str(e))

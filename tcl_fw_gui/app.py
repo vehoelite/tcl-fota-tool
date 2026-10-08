@@ -11,6 +11,8 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from tcl_fw import reporting
+
 from .main_window import MainWindow
 
 # A restrained dark theme; Qt falls back gracefully if colours are unsupported.
@@ -33,6 +35,10 @@ QProgressBar::chunk { background: #2f6df6; border-radius: 3px; }
 
 
 def run() -> int:
+    # Uncaught exceptions - including ones raised in Qt slots, which PySide
+    # routes to sys.excepthook - are reported (type + tcl-fw frames only, see
+    # tcl_fw/reporting.py) when community sharing is on.
+    reporting.install_excepthook("gui")
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("tcl-fw")
     app.setStyleSheet(_QSS)

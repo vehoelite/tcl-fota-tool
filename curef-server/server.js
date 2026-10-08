@@ -154,6 +154,7 @@ function readBody(req) {
 // ── the /about transparency page ──────────────────────────────────────────────
 function aboutPage() {
   const s = stats();
+  const e = errorStats();
   return `tcl-curef community device registry
 =====================================
 
@@ -181,6 +182,28 @@ WHAT IT DOES NOT RECORD
   specific phone — only the model/build identifiers that are the same across
   every identical device.
 
+ANONYMOUS ERROR REPORTS (tcl-fw 4.5.0+, same on/off switch)
+  So bugs get fixed between the maintainer's occasional working sessions,
+  instead of lingering for weeks, tcl-fw also reports what went wrong:
+
+    code          from a fixed list, e.g. body_checksum_mismatch, cdn_404,
+                  unverified, exception
+    exc_type      the error's type name only, e.g. PermissionError (+ errno)
+    stack         where in tcl-fw it happened: module:function:line, for
+                  tcl-fw's own code only
+    versions      tcl-fw, Python (major.minor), PySide, OS family
+                  (Windows / Linux / Darwin)
+    command       pull / list / pack / verify / gui
+    curef, tv,    the device IDs above
+    fw_id, mode
+
+  NEVER sent: the error message, file paths, folder names, your username,
+  command-line arguments, or anything typed. The server keeps only the fields
+  listed above and discards everything else in a request. Reports are grouped
+  by error and version, and published in full:
+
+    /api/errors   (public)   /api/errors?version=4.5.0
+
 HOW IT HELPS
   New curef/fv combinations feed the tool's built-in device + firmware
   templates, so the next person with your phone gets auto-detect and a
@@ -196,7 +219,11 @@ WHAT'S RECORDED RIGHT NOW
   ${s.devices} distinct curefs, ${s.combos} curef/fv combinations,
   ${s.total} total submissions. Last updated ${s.updated || "never"}.
 
+  ${e.groups} distinct error groups from ${e.reports} reports.
+  Last error report ${e.updated || "never"}.
+
   Browse the raw data as JSON:  /api/curefs     (public)
+  Error reports as JSON:        /api/errors     (public)
   Summary counts as JSON:       /api/stats      (public)
 `;
 }
@@ -249,6 +276,146 @@ function stats() {
     if (!updated || (r.last_seen && r.last_seen > updated)) updated = r.last_seen;
   }
   return { devices: curefs.size, combos: store.size, total, updated, last_revalidated: lastRevalidate };
+}
+
+// ── anonymous error reports (tcl-fw 4.5.0+) ──────────────────────────────────
+// Kept entirely apart from the curef store: own map, own files. A report holds
+// NO free text - only a code from a fixed vocabulary, an exception type name,
+// errno, tcl-fw stack frames as module:function:line, versions, and the device
+// IDs the tool already shares. Everything else in a request is ignored, so even
+// a hand-crafted POST cannot put a path, a message or a name into the public
+// /api/errors feed.
+const ERR_AGG_FILE = path.join(DATA_DIR, "errors.json");
+const ERR_EVENTS_FILE = path.join(DATA_DIR, "errors.jsonl");
+const ERR_CODES = new Set([
+  "probe_failed", "cdn_404", "no_name", "empty_header", "header_rejected",
+  "footer_missing", "footer_checksum_mismatch", "body_checksum_mismatch",
+  "body_short", "unwrap_short", "unwrap_crc", "unwrap_unknown_length",
+  "pull_error", "unverified", "name_collision",
+  "pack_no_scatter", "pack_low_confidence", "exception",
+]);
+const ERR_COMMANDS = new Set(["pull", "list", "pack", "verify", "gui", "other"]);
+const ERR_OS = new Set(["Windows", "Linux", "Darwin", "Other"]);
+const RE_EXC = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const RE_FRAME = /^tcl_fw(_gui)?\.[A-Za-z0-9_]{1,40}:[A-Za-z_<>][A-Za-z0-9_<>]{0,63}:\d{1,6}$/;
+const RE_PY = /^\d\.\d{1,2}$/;
+const ERR_MAX_CUREFS = 50;
+
+/** key `${tool_version} ${code} ${exc_type} ${top_frame}` -> aggregate */
+const errors = new Map();
+let errDirty = false;
+let errTimer = null;
+
+function loadErrors() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(ERR_AGG_FILE, "utf8"));
+    for (const rec of raw.errors || []) {
+      const key = rec._key;
+      delete rec._key;
+      if (key) errors.set(key, rec);
+    }
+    log(`loaded ${errors.size} error groups from ${ERR_AGG_FILE}`);
+  } catch (e) {
+    if (e.code !== "ENOENT") log(`error-store load error: ${e.message}`);
+  }
+}
+
+function flushErrors() {
+  errTimer = null;
+  if (!errDirty) return;
+  errDirty = false;
+  const rows = [...errors.entries()].map(([key, rec]) => Object.assign({ _key: key }, rec));
+  const tmp = ERR_AGG_FILE + ".tmp";
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ updated: new Date().toISOString(), count: rows.length, errors: rows }));
+    fs.renameSync(tmp, ERR_AGG_FILE);
+  } catch (e) {
+    log(`error-store flush error: ${e.message}`);
+    errDirty = true;
+  }
+}
+
+function scheduleErrorFlush() {
+  errDirty = true;
+  if (!errTimer) errTimer = setTimeout(flushErrors, FLUSH_MS);
+}
+
+function bump(obj, k) { obj[k] = (obj[k] || 0) + 1; }
+
+function handleError(req, res, body) {
+  if (API_KEY && req.headers["x-tcl-key"] !== API_KEY) {
+    return sendJson(res, 401, { ok: false, error: "bad or missing key" });
+  }
+  let data;
+  try { data = JSON.parse(body || "{}"); } catch { return sendJson(res, 400, { ok: false, error: "invalid json" }); }
+
+  const ver = RE_VER.test(String(data.tool_version || "")) ? String(data.tool_version) : null;
+  if (!ver) return sendJson(res, 400, { ok: false, error: "invalid tool_version" });
+  const py = RE_PY.test(String(data.python || "")) ? String(data.python) : null;
+  const os_ = ERR_OS.has(String(data.os)) ? String(data.os) : "Other";
+  const pyside = RE_VER.test(String(data.pyside || "")) ? String(data.pyside) : null;
+  const command = ERR_COMMANDS.has(String(data.command)) ? String(data.command) : "other";
+  const curef = RE_CUREF.test(String(data.curef || "")) ? String(data.curef) : null;
+  const tv = RE_TVFW.test(String(data.tv || "")) ? String(data.tv) : null;
+  const fw_id = RE_TVFW.test(String(data.fw_id || "")) ? String(data.fw_id) : null;
+  const mode = ["2", "4"].includes(String(data.mode)) ? String(data.mode) : null;
+
+  const events = [];
+  for (const ev of Array.isArray(data.events) ? data.events.slice(0, 20) : []) {
+    const code = String((ev && ev.code) || "");
+    if (!ERR_CODES.has(code)) continue;                       // unknown -> dropped
+    const n = Number(ev.count);
+    const count = Number.isInteger(n) && n > 0 && n < 100000 ? n : 1;
+    const exc_type = RE_EXC.test(String(ev.exc_type || "")) ? String(ev.exc_type) : null;
+    const errno = Number.isInteger(ev.errno) && Math.abs(ev.errno) < 100000 ? ev.errno : null;
+    const stack = (Array.isArray(ev.stack) ? ev.stack : [])
+      .map(String).filter((f) => RE_FRAME.test(f)).slice(-12);
+    events.push({ code, count, exc_type, errno, stack });
+  }
+  if (!events.length) return sendJson(res, 400, { ok: false, error: "no valid events" });
+
+  const now = new Date().toISOString();
+  for (const ev of events) {
+    const top = ev.stack.length ? ev.stack[ev.stack.length - 1] : "";
+    const key = `${ver} ${ev.code} ${ev.exc_type || ""} ${top}`;
+    let g = errors.get(key);
+    if (!g) {
+      g = { code: ev.code, exc_type: ev.exc_type, errno: ev.errno, top_frame: top || null,
+            stack: ev.stack, tool_version: ver, count: 0, reports: 0,
+            first_seen: now, last_seen: now, os: {}, python: {}, pyside: {},
+            commands: {}, curefs: [] };
+      errors.set(key, g);
+      log(`NEW ERROR ${ver} ${ev.code}${ev.exc_type ? " " + ev.exc_type : ""}${top ? " @ " + top : ""}`);
+    }
+    g.count += ev.count;
+    g.reports += 1;
+    g.last_seen = now;
+    bump(g.os, os_);
+    if (py) bump(g.python, py);
+    if (pyside) bump(g.pyside, pyside);
+    bump(g.commands, command);
+    if (curef && !g.curefs.includes(curef) && g.curefs.length < ERR_MAX_CUREFS) g.curefs.push(curef);
+  }
+  fs.appendFile(ERR_EVENTS_FILE, JSON.stringify({ t: now, ver, py, os: os_, pyside, command, curef, tv, fw_id, mode, events }) + "\n", () => {});
+  scheduleErrorFlush();
+  return sendJson(res, 200, { ok: true, accepted: events.length });
+}
+
+function errorFeed(url) {
+  const ver = url.searchParams.get("version");
+  const rows = [...errors.values()]
+    .filter((g) => !ver || g.tool_version === ver)
+    .sort((a, b) => (b.last_seen || "").localeCompare(a.last_seen || ""));
+  return { count: rows.length, errors: rows };
+}
+
+function errorStats() {
+  let reports = 0, groups = errors.size, updated = null;
+  for (const g of errors.values()) {
+    reports += g.reports || 0;
+    if (!updated || g.last_seen > updated) updated = g.last_seen;
+  }
+  return { groups, reports, updated };
 }
 
 // ── request handling ──────────────────────────────────────────────────────────
@@ -392,6 +559,13 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       return handleRecord(req, res, body);
     }
+    if (req.method === "POST" && p === "/api/error") {
+      const body = await readBody(req);
+      return handleError(req, res, body);
+    }
+    if (req.method === "GET" && p === "/api/errors") {
+      return sendJson(res, 200, errorFeed(url));
+    }
     if (req.method === "POST" && p === "/api/revalidate") {
       if (API_KEY && req.headers["x-tcl-key"] !== API_KEY) return sendJson(res, 401, { ok: false, error: "bad or missing key" });
       revalidateAll().catch((e) => log(`revalidate error: ${e.message}`));  // fire-and-forget
@@ -407,7 +581,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { devices: templatesFeed() });
     }
     if (req.method === "GET" && p === "/api/stats") {
-      return sendJson(res, 200, stats());
+      return sendJson(res, 200, Object.assign(stats(), { errors: errorStats() }));
     }
     if (req.method === "GET" && p === "/healthz") {
       return sendJson(res, 200, { ok: true, records: store.size });
@@ -425,6 +599,7 @@ const server = http.createServer(async (req, res) => {
 // ── boot ────────────────────────────────────────────────────────────────────
 fs.mkdirSync(DATA_DIR, { recursive: true });
 loadStore();
+loadErrors();
 if (!API_KEY) log("WARNING: TCL_CUREF_KEY not set — write endpoint is unauthenticated");
 
 server.listen(PORT, HOST, () => log(`tcl-curef server listening on ${HOST}:${PORT} (data: ${DATA_DIR})`));
@@ -433,6 +608,7 @@ scheduleRevalidation();
 function shutdown() {
   log("shutting down, flushing…");
   flush();
+  flushErrors();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000).unref();
 }

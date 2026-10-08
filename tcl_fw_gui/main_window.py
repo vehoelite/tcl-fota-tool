@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from tcl_fw import __version__, devices, fota, sharing, templates
+from tcl_fw import __version__, devices, fota, reporting, sharing, templates
 from tcl_fw.crypto import key_hex
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
@@ -301,7 +301,7 @@ class MainWindow(QMainWindow):
 
         # Community sharing (opt-out) footer
         frow = QHBoxLayout()
-        self.share_chk = QCheckBox("Share anonymous device IDs (curef + fv) to grow the device list")
+        self.share_chk = QCheckBox("Share anonymous device IDs and error reports (public) to improve tcl-fw")
         self.share_chk.setChecked(sharing.is_enabled())
         self.share_chk.setToolTip("Opt-out. Shares only device/firmware identifiers — "
                                   "no IMEI, no IP, no account.")
@@ -338,15 +338,25 @@ class MainWindow(QMainWindow):
         if not sharing.notice_pending():
             return
         box = QMessageBox(self)
-        box.setWindowTitle("Community device sharing")
+        box.setWindowTitle("Community sharing")
         box.setTextFormat(Qt.RichText)
         box.setText(
-            "<b>tcl-fw can share the device IDs it looks up</b> (curef + firmware "
-            "version) with a community registry, so the built-in device list grows "
-            "automatically for everyone.<br><br>"
-            "<b>Shared:</b> curef, firmware version, mode, resolved build, tool version.<br>"
-            "<b>Not shared:</b> no IMEI, no IP, no account — nothing that identifies you."
-            "<br><br>It's on by default. You can turn it off now or any time from the "
+            "<b>tcl-fw shares two things with a public community registry</b>, so the "
+            "tool gets better for everyone:<br><br>"
+            "<b>1. Device IDs it looks up</b> — curef, firmware version, mode, resolved "
+            "build, the device model name (a read-only build property, the same on "
+            "every unit of that model), and the tcl-fw version. This grows the "
+            "built-in device list automatically.<br><br>"
+            "<b>2. New: anonymous error reports</b> — when a pull fails, a checksum "
+            "doesn't match, or the app crashes: an error code, the error type, where "
+            "in tcl-fw it happened (module:function:line), the tcl-fw / Python / OS "
+            "version, and the device IDs above. <b>Never</b> the error message, file "
+            "paths, folder names or your username. This lets bugs get fixed between "
+            "the maintainer's occasional working sessions instead of lingering.<br><br>"
+            "<b>Not shared:</b> no IMEI or serial, no IP, no account, no location — "
+            "nothing that identifies you or your phone. Everything recorded is public "
+            "(<i>/api/curefs</i> and <i>/api/errors</i> on the registry).<br><br>"
+            "It's on by default. You can turn it off now or any time from the "
             "checkbox at the bottom of the window."
         )
         keep = box.addButton("Keep sharing on", QMessageBox.AcceptRole)
@@ -709,6 +719,11 @@ class MainWindow(QMainWindow):
         self._status(f"Done — {ok}/{len(results)} parts written ({dec} decrypted). "
                      f"manifest.json saved.")
         self._log(f"Finished: {ok}/{len(results)} OK, {dec} decrypted. Manifest: {mpath}")
+        # One anonymous report per pull if anything went wrong (codes + counts
+        # only; nothing is sent when every file verified cleanly).
+        if self._info:
+            reporting.report_pull(results, self._info.curef, self._info.tv,
+                                  self._info.fw_id)
         # Never let a failure, a name clash, or an unproven image pass quietly.
         good = [r for r in results if not r.error]
         unver = [r for r in good if r.verified is None]

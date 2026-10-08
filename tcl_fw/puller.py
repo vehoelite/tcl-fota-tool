@@ -44,6 +44,7 @@ class PartResult:
     verified: Optional[bool] = None
     error: Optional[str] = None
     collided: bool = False    # another file already claimed this name
+    code: Optional[str] = None  # reporting.CODES entry when something failed
 
 
 @dataclass
@@ -233,16 +234,17 @@ def pull_one(plan: PullPlan, f: FileEntry, outdir: str,
         bs = fota.body_size(info.slave, f.rel_url) if info.slave else 0
         plan.sizes[f.file_id] = bs
         if bs == fota.BODY_GONE:
-            return PartResult(f.file_id, "?", "skip",
+            return PartResult(f.file_id, "?", "skip", code="cdn_404",
                               error="no longer on TCL's CDN (404) - not pulled. "
                                     "OTA deltas expire; FULL (--mode 4) does not.")
         if bs < 0:
-            return PartResult(f.file_id, "?", "skip",
+            return PartResult(f.file_id, "?", "skip", code="probe_failed",
                               error="body size probe failed - not pulled")
     is_small = bs == 0
     name = _resolve_name(plan, f, is_small)
     if not name:
-        return PartResult(f.file_id, "?", "skip", error="no name / empty")
+        return PartResult(f.file_id, "?", "skip", error="no name / empty",
+                          code="no_name")
 
     # Reserve the destination so two files can never share one path: the .sca
     # join is not injective, and a shared path means a resumed body appends
@@ -257,7 +259,7 @@ def pull_one(plan: PullPlan, f: FileEntry, outdir: str,
                            on_progress, verify)
     except Exception as e:
         return PartResult(f.file_id, name, "header" if is_small else "body",
-                          error=str(e), collided=collided)
+                          error=str(e), collided=collided, code="pull_error")
 
 
 def _sha1(b: bytes) -> str:
@@ -291,9 +293,9 @@ def _pull_image(plan: PullPlan, f: FileEntry, bs: int, name: str, dest: str,
     is_small = bs == 0
     kind = "header" if is_small else "body"
 
-    def fail(msg: str) -> PartResult:
+    def fail(msg: str, code: str) -> PartResult:
         _discard(part)
-        return PartResult(f.file_id, name, kind, error=msg, verified=False,
+        return PartResult(f.file_id, name, kind, error=msg, verified=False, code=code,
                           collided=collided)
 
     cs = fetch_checksums(info.encslave, f.rel_url) if (verify and info.encslave) else None
@@ -310,16 +312,16 @@ def _pull_image(plan: PullPlan, f: FileEntry, bs: int, name: str, dest: str,
         try:
             foot = decrypt_header(enc)
         except ValueError as e:
-            return fail("header blob rejected: %s" % e)
+            return fail("header blob rejected: %s" % e, "header_rejected")
     else:
         foot = b""
     if is_small and not foot:
-        return fail("empty header")
+        return fail("empty header", "empty_header")
     if cs and cs.footer:
         if not foot:
-            return fail("server lists a footer but none was returned")
+            return fail("server lists a footer but none was returned", "footer_missing")
         if _sha1(foot) != cs.footer:
-            return fail("footer/header checksum mismatch")
+            return fail("footer/header checksum mismatch", "footer_checksum_mismatch")
     elif not is_small and not foot:
         # No checksum to say whether a footer exists, and none was served. The
         # image may be complete or 4 MiB short; there is no way to tell.
@@ -350,10 +352,18 @@ def _pull_image(plan: PullPlan, f: FileEntry, bs: int, name: str, dest: str,
             # body cannot be re-proven without re-downloading: say so.
             return PartResult(f.file_id, name, kind, size=want, path=dest,
                               verified=None, collided=collided)
-        got, body_sha, _raw = stream_unwrap(info.slave, f.rel_url, part,
-                                            wrapped[2], on_progress, tail=foot)
+        try:
+            got, body_sha, _raw = stream_unwrap(info.slave, f.rel_url, part,
+                                                wrapped[2], on_progress, tail=foot)
+        except IOError as e:
+            msg = str(e)
+            code = ("unwrap_crc" if "CRC" in msg
+                    else "unwrap_unknown_length" if "unknown length" in msg
+                    else "unwrap_short" if "ended early" in msg
+                    else "pull_error")
+            return fail(msg, code)
         if cs and cs.body and body_sha != cs.body:
-            return fail("body checksum mismatch")
+            return fail("body checksum mismatch", "body_checksum_mismatch")
         os.replace(part, dest)
         # Proven when the footer matched FOOTER and the body is covered either
         # by BODY or by the zip's own CRC-32 over the whole inflated image
@@ -383,9 +393,10 @@ def _pull_image(plan: PullPlan, f: FileEntry, bs: int, name: str, dest: str,
 
     got = stream_body(info.slave, f.rel_url, part, on_progress)
     if got != bs:
-        return fail("body is %d bytes, expected %d (download incomplete)" % (got, bs))
+        return fail("body is %d bytes, expected %d (download incomplete)" % (got, bs),
+                    "body_short")
     if cs and cs.body and sha1_file(part) != cs.body:
-        return fail("body checksum mismatch")
+        return fail("body checksum mismatch", "body_checksum_mismatch")
     with open(part, "ab") as fh:
         fh.write(foot)
     os.replace(part, dest)
@@ -399,7 +410,7 @@ def write_manifest(curef: str, plan: PullPlan, results: list[PartResult],
     info = plan.info
     doc = {
         "curef": curef, "tv": info.tv, "fw_id": info.fw_id,
-        "generated_by": "tcl-fw 4.4.0",
+        "generated_by": "tcl-fw 4.5.0",
         "credit": "header decryption by Littlenine Ennea (github.com/LittlenineEnnea)",
         "slave": info.slave, "encslave": info.encslave,
         "files": [
