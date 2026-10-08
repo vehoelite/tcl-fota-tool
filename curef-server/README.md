@@ -38,7 +38,7 @@ Kept in a separate store (`errors.json` / `errors.jsonl`), grouped by
 | `stack` | `tcl_fw.puller:pull_one:250` | frames must match `tcl_fw(_gui).<module>:<func>:<line>`; others dropped |
 | `tool_version`, `python`, `pyside`, `os` | `4.5.0`, `3.12`, `6.11.2`, `Windows` | `os` is one of Windows/Linux/Darwin/Other |
 | `command` | `pull` | pull / list / pack / verify / gui / other |
-| `curefs` | `["T611B-2ALCGB12"]` | devices affected (capped at 50 per group) |
+| `curefs` | `["T611B-2ALCGB12"]` | devices affected — capped at the first 50 per group, so a group with 50 entries may affect more (`count`/`reports` stay exact) |
 | `count`, `reports`, `first_seen`, `last_seen` | | aggregation |
 
 There is **no free-text field**. The server copies only the fields above out of
