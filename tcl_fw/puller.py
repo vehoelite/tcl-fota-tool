@@ -232,6 +232,10 @@ def pull_one(plan: PullPlan, f: FileEntry, outdir: str,
         # give up rather than guess.
         bs = fota.body_size(info.slave, f.rel_url) if info.slave else 0
         plan.sizes[f.file_id] = bs
+        if bs == fota.BODY_GONE:
+            return PartResult(f.file_id, "?", "skip",
+                              error="no longer on TCL's CDN (404) - not pulled. "
+                                    "OTA deltas expire; FULL (--mode 4) does not.")
         if bs < 0:
             return PartResult(f.file_id, "?", "skip",
                               error="body size probe failed - not pulled")
@@ -296,7 +300,12 @@ def _pull_image(plan: PullPlan, f: FileEntry, bs: int, name: str, dest: str,
 
     # The header blob first: it is at most ~4 MiB, so a bad one is caught before
     # a multi-GB body is downloaded.
-    enc = fota.fetch_header(info.encslave, f.rel_url) if info.encslave else b""
+    # When checksum.php answered for a large file but lists no FOOTER, the
+    # server has said there is no footer: don't fetch one (an error page there
+    # would otherwise be refused as bad padding and fail a file that is fine).
+    no_footer = cs is not None and not cs.footer and not is_small
+    enc = (fota.fetch_header(info.encslave, f.rel_url)
+           if info.encslave and not no_footer else b"")
     if len(enc) >= 16:
         try:
             foot = decrypt_header(enc)
@@ -315,7 +324,9 @@ def _pull_image(plan: PullPlan, f: FileEntry, bs: int, name: str, dest: str,
         # No checksum to say whether a footer exists, and none was served. The
         # image may be complete or 4 MiB short; there is no way to tell.
         pass
-    checked = bool(cs and cs.footer)                 # every byte so far proven
+    # Every byte so far proven: the footer matched FOOTER, or the server's
+    # checksum record says this file has no footer at all.
+    checked = bool(cs and (cs.footer or no_footer))
 
     if is_small:
         with open(part, "wb") as fh:

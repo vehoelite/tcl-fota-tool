@@ -155,8 +155,10 @@ def list_cmd(
     table = Table(show_lines=False, header_style="bold")
     table.add_column("FILE_NAME", style="green", no_wrap=True)
     table.add_column("FILE_ID", style="dim")
-    table.add_column("SIZE", justify="right")
+    table.add_column("BODY SIZE", justify="right")
     table.add_column("SOURCE")
+    table.caption = ("BODY SIZE is the streamed part only: a large image is the body "
+                     "plus a 4 MiB footer from the encrypted header.")
     # Sort by real (probed) body size, largest first; header parts (size<=0) last.
     for f in sorted(info.files, key=lambda x: -(plan.sizes.get(x.file_id, -1))):
         bs = plan.sizes.get(f.file_id, -1)
@@ -168,6 +170,7 @@ def list_cmd(
                   else naming.magic_name(fota.body_head(info.slave, f.rel_url,
                                                         n=puller.NAME_HEAD_BYTES))[0])
         src = ("[cyan]header[/]" if is_small
+               else "[yellow]gone (404)[/]" if bs == fota.BODY_GONE
                else "[yellow]probe failed[/]" if bs < 0 else "body")
         size = "[dim]—[/]" if is_small else "[dim]?[/]" if bs < 0 else f"{bs:,}"
         table.add_row(nm, f.file_id, size, src)

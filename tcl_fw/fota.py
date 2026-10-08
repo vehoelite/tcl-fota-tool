@@ -154,7 +154,9 @@ def request_download(curef: str, tv: str, fw_id: str,
 
 
 def fetch_header(encslave: str, rel: str, timeout: int = 120) -> bytes:
-    """POST encrypt_header.php on an encrypt slave -> the raw encrypted header blob."""
+    """POST encrypt_header.php on an encrypt slave -> the raw encrypted header
+    blob, or b"" if the server answered with anything but 200 (an error page
+    must never reach the decryptor as if it were a blob)."""
     body = urllib.parse.urlencode(
         {"account": ENC_ACCOUNT, "password": ENC_PASSWORD, "address": rel}
     ).encode()
@@ -166,15 +168,21 @@ def fetch_header(encslave: str, rel: str, timeout: int = 120) -> bytes:
              "User-Agent": USER_AGENT, "Content-Length": str(len(body))},
         )
         resp = conn.getresponse()
-        return resp.read()
+        data = resp.read()
+        return data if resp.status == 200 else b""
     finally:
         conn.close()
 
 
+#: body_size() result for a file the CDN no longer has (HTTP 404). Distinct from
+#: -1 (network error): retrying a 404 never helps, and expired OTA deltas 404.
+BODY_GONE = -2
+
+
 def body_size(slave: str, rel: str, timeout: int = 25) -> int:
-    """Range-probe a body. Returns total size, 0 for an empty body (HTTP 416 or
-    a zero-length range) meaning the image lives in the encrypted header, or -1
-    on network error."""
+    """Range-probe a body. Returns total size; 0 for an empty body (HTTP 416 or
+    a zero-length range) meaning the image lives in the encrypted header;
+    BODY_GONE (-2) if the CDN no longer has the file; -1 on any other error."""
     try:
         req = urllib.request.Request(
             "http://%s%s" % (slave, rel),
@@ -184,10 +192,18 @@ def body_size(slave: str, rel: str, timeout: int = 25) -> int:
             cr = r.headers.get("Content-Range", "")
             if "/" in cr:
                 return int(cr.split("/")[-1])
-            return len(r.read())
+            # Range ignored (200): trust Content-Length rather than reading
+            # what may be a multi-GB body just to measure it.
+            cl = r.headers.get("Content-Length")
+            if cl is not None:
+                return int(cl)
+            return len(r.read(2))
     except Exception as e:
-        if getattr(e, "code", None) == 416:
+        code = getattr(e, "code", None)
+        if code == 416:
             return 0
+        if code == 404:
+            return BODY_GONE
         return -1
 
 

@@ -179,6 +179,50 @@ def test_an_invalid_header_blob_is_refused(server, tmp_path, monkeypatch):
     assert not list(tmp_path.iterdir())
 
 
+def test_no_footer_listed_means_no_header_fetch(server, tmp_path, monkeypatch):
+    """Mode-2 OTA and other single-part files: checksum.php lists BODY but no
+    FOOTER. The blob endpoint may answer with an error page; it must not be
+    fetched, decrypted, refused - or appended."""
+    from tcl_fw.download import parse_checksums as pc
+    body = os.urandom(20_000)
+    f = server("13", body, b"", checksums=False)
+    monkeypatch.setattr(puller, "fetch_checksums", lambda enc, rel, **k: pc(
+        "<GOTU><FILE_CHECKSUM_LIST><FILE><ADDRESS>%s</ADDRESS><BODY>%s</BODY>"
+        "</FILE></FILE_CHECKSUM_LIST></GOTU>" % (rel, sha1(body)), rel))
+    calls = []
+    monkeypatch.setattr(fota, "fetch_header",
+                        lambda *a, **k: calls.append(a) or b"<html>502 Bad Gateway</html>")
+    r = puller.pull_one(server.plan([f]), f, str(tmp_path))
+    assert r.error is None and r.verified is True
+    assert calls == []
+    assert (tmp_path / "p13.img").read_bytes() == body
+
+
+def test_error_page_from_header_endpoint_is_not_decrypted(monkeypatch):
+    """fetch_header must return nothing for a non-200, not the error body."""
+    class Resp:
+        status = 502
+
+        def read(self):
+            return b"<html>502 Bad Gateway</html>" * 4
+
+    class Conn:
+        def __init__(self, *a, **k):
+            pass
+
+        def request(self, *a, **k):
+            pass
+
+        def getresponse(self):
+            return Resp()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(fota.http.client, "HTTPConnection", Conn)
+    assert fota.fetch_header("enc", "/x") == b""
+
+
 # ── #15 on the zip-wrapped path: the deflate stream crosses the seam ─────────
 
 def _wrapped(image: bytes) -> bytes:

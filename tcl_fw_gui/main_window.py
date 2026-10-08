@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from tcl_fw import __version__, devices, sharing, templates
+from tcl_fw import __version__, devices, fota, sharing, templates
 from tcl_fw.crypto import key_hex
 from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PartResult, PullPlan
@@ -190,6 +190,9 @@ class MainWindow(QMainWindow):
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
             ["", "Partition", "FILE_ID", "Size", "Source", "Progress"])
+        self.table.horizontalHeaderItem(3).setToolTip(
+            "Before pulling: the body size only. A large image is the body plus a "
+            "4 MiB footer from the encrypted header; the final size shows after the pull.")
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
@@ -530,6 +533,7 @@ class MainWindow(QMainWindow):
             is_small = bs == 0                     # bs < 0 == the probe failed
             name = plan.names.get(f.file_id) or plan.guessed.get(f.file_id) or (
                 "«in encrypted header»" if is_small
+                else "«gone from TCL's CDN»" if bs == fota.BODY_GONE
                 else "«probe failed»" if bs < 0 else f"‹{f.file_id}›")
 
             sel = QTableWidgetItem()
@@ -586,7 +590,10 @@ class MainWindow(QMainWindow):
         for fid, row in self._row_of.items():
             is_small = self._plan.sizes.get(fid, -1) == 0 if self._plan else False
             name = self.table.item(row, C_NAME).text().lower()
-            hide = (small_only and not is_small) or (needle and needle not in name)
+            # bool(): with an empty filter `needle and ...` is "", which recent
+            # PySide6 rejects - and the exception aborted _on_loaded before the
+            # background name probe started.
+            hide = bool((small_only and not is_small) or (needle and needle not in name))
             self.table.setRowHidden(row, hide)
 
     def _check_visible(self, checked: bool) -> None:

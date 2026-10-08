@@ -145,7 +145,7 @@ adb shell getprop ro.tct.curef
 | Command | What it does |
 |---|---|
 | `tcl-fw pull [curef]` | Download + decrypt a device's service package into flashable images. Auto-detects the curef from a plugged-in phone if omitted. `--small`, `--only p1,p2`, `--out DIR`, `--no-verify`. |
-| `tcl-fw list [curef]` | Resolve a device and list every partition: name, real size, and whether it comes from the body or the encrypted header. |
+| `tcl-fw list [curef]` | Resolve a device and list every partition: name, body size, and whether it comes from the body or the encrypted header. |
 | `tcl-fw decrypt <blob>` | Decrypt a single local encrypted-header blob and name it by content. |
 | `tcl-fw devices [--detect]` | List known devices, or probe for a connected phone. |
 | `tcl-fw templates [--all]` | List validated firmware templates with a **NEW** tag on recent builds (`--all` shows full release history). |
