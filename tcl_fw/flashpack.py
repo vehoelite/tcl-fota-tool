@@ -95,8 +95,9 @@ def _probe_dir(pkgdir: str) -> list[Probe]:
         b = os.path.basename(p)
         if not os.path.isfile(p) or b in _SKIP:
             continue
-        if b.endswith((".txt",)) or b.startswith("scatter_or_cfg") or b.endswith(".xml"):
-            continue                                  # config/scatter, not a partition
+        if (b.endswith((".txt", ".xml", ".sca", ".part"))
+                or b.startswith(("scatter_or_cfg", "."))):
+            continue          # scatter/config/staging files are not partitions
         probes.append(probe_file(p))
     return probes
 
@@ -289,21 +290,41 @@ def resolve(doc: ScatterDoc, probes: list[Probe]) -> tuple[list[Match], list[Pro
 # ── orchestration ─────────────────────────────────────────────────────────────
 
 def find_scatter(pkgdir: str) -> Optional[tuple[str, ScatterDoc]]:
-    """Locate + parse the MTK scatter XML in a pulled folder."""
-    for p in glob.glob(os.path.join(pkgdir, "*")):
-        if not os.path.isfile(p):
+    """Locate + parse the device's MTK scatter in a pulled folder.
+
+    Two forms ship: an XML scatter some devices carry as a partition, and the
+    text form TCL serves as the GOTU .sca (#17). Both hold the same layout. The
+    XML is preferred when present; a scatter.txt that `pack` itself wrote is
+    used only as a last resort, so re-running pack stays anchored to TCL's own
+    file."""
+    found: dict[str, tuple[str, ScatterDoc]] = {}
+    for p in sorted(glob.glob(os.path.join(pkgdir, "*"))):
+        if not os.path.isfile(p) or os.path.getsize(p) > (8 << 20):
             continue
         try:
             with open(p, "rb") as f:
-                text = f.read(400).decode("latin1", "replace")
-            if not text.lstrip().startswith("<?xml"):
+                head = f.read(4096).decode("latin1", "replace")
+            if "MTK_PLATFORM_CFG" not in head and "<?xml" not in head:
                 continue
             with open(p, "r", encoding="utf-8", errors="replace") as f:
                 full = f.read()
-            if scatter.looks_like_mtk(full):
-                return p, scatter.parse(full)
+            if not scatter.looks_like_mtk(full):
+                continue
+            doc = scatter.parse(full)
+            if not doc.download_parts():
+                continue
         except Exception:
             continue                     # unreadable/unparseable scatter -> skip
+        if full.lstrip().startswith("<"):
+            kind = "xml"
+        elif p.lower().endswith("_android_scatter.txt"):
+            kind = "ours"
+        else:
+            kind = "sca"
+        found.setdefault(kind, (p, doc))
+    for kind in ("xml", "sca", "ours"):
+        if kind in found:
+            return found[kind]
     return None
 
 

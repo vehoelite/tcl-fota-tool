@@ -39,6 +39,10 @@ Works on TCL-made Android devices (TCL, REVVL, Alcatel).
   parser expected JSON, failed, and quietly returned nothing. Every byte of every
   image is now verified against TCL's own SHA-1s, mismatches write nothing, and
   anything that *couldn't* be verified is reported as such.
+* **Make flashable works on `.sca` devices** ([#17]). It only read the MTK
+  scatter XML, so devices that ship TCL's `.sca` instead (e.g. T611B) got "No
+  MTK scatter in this folder". The `.sca` *is* an MTK scatter — the text form
+  SP Flash Tool loads — and is now read directly.
 * Re-running a pull no longer mistakes a short 4.x image for a complete one.
 * `--only` accepts FILE_IDs (devices without a `.sca` have no names to match),
   and selecting nothing is an error instead of a green "0/0 files".
@@ -48,6 +52,7 @@ of both #15 and #16.
 
 [#15]: https://github.com/vehoelite/tcl-fota-tool/issues/15
 [#16]: https://github.com/vehoelite/tcl-fota-tool/issues/16
+[#17]: https://github.com/vehoelite/tcl-fota-tool/issues/17
 
 ## What's new in 4.3.1 — safety patch
 

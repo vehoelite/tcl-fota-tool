@@ -305,8 +305,9 @@ class PackWorker(QThread):
         try:
             result = flashpack.build(self._dir)
             if not result:
-                self.failed.emit("No MTK scatter in this folder "
-                                 "(device may use the GOTU .sca format).")
+                self.failed.emit("No scatter in this folder. Make flashable reads "
+                                 "the device's .sca (or MTK scatter XML) - pull it "
+                                 "along with the images, then try again.")
                 return
             flashpack.apply(self._dir, result, min_confidence=self._conf)
             self.done.emit(result)

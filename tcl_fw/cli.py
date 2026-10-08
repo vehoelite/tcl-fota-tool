@@ -310,8 +310,10 @@ def _run_pack(outdir: str, dry_run: bool = False, min_conf: float = 0.7) -> None
     SP Flash Tool scatter.txt. Shared by `pack` and `pull --pack`."""
     result = flashpack.build(outdir)
     if not result:
-        console.print("[yellow]No MTK scatter found[/] in this folder — "
-                      "nothing to pack (device may use the GOTU .sca format).")
+        console.print("[yellow]No scatter found[/] in this folder — nothing to "
+                      "pack. Pack reads the device's .sca (or MTK scatter XML); "
+                      "pull it with the rest of the package, e.g. "
+                      "[bold]tcl-fw pull <curef> --small[/].")
         return
     conf = sorted((m for m in result.matches if m.part and m.confidence >= min_conf),
                   key=lambda m: -m.probe.size)

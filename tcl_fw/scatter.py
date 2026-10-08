@@ -53,7 +53,8 @@ class ScatterDoc:
 
 
 def looks_like_mtk(text: str) -> bool:
-    """True if `text` is an MTK_PLATFORM_CFG scatter (not a GOTU .sca)."""
+    """True if `text` is an MTK_PLATFORM_CFG scatter, XML or text form (a GOTU
+    .sca is the text form)."""
     return "MTK_PLATFORM_CFG" in text and "partition_index" in text
 
 
@@ -75,7 +76,79 @@ def _clean_xml(text: str) -> str:
     return text.rstrip("\x00\x0b\x0c \t\r\n")
 
 
-def parse(xml_text: str) -> ScatterDoc:
+def parse(text: str) -> ScatterDoc:
+    """Parse an MTK scatter in either form it ships in: the XML some devices
+    carry as a partition, or the text (YAML-like) form - which is what TCL's
+    GOTU .sca is, and what SP Flash Tool itself loads (#17)."""
+    if text.lstrip().startswith("<"):
+        return parse_xml(text)
+    return parse_text(text)
+
+
+def _kv(line: str) -> tuple[str, str]:
+    """'  - partition_index: SYS0' -> ('partition_index', 'SYS0')."""
+    s = line.strip()
+    if s.startswith("- "):
+        s = s[2:].strip()
+    k, _, v = s.partition(":")
+    return k.strip(), v.strip()
+
+
+def parse_text(text: str) -> ScatterDoc:
+    """Parse the text scatter form (a GOTU .sca, or an *_Android_scatter.txt).
+
+    It is a flat list of '- partition_index:' blocks of 'key: value' lines,
+    after a '- general: MTK_PLATFORM_CFG' info block. Comment lines start with
+    '#'. Partitions are de-duplicated by partition_name, first occurrence wins,
+    matching the XML parser."""
+    info: dict[str, str] = {}
+    blocks: list[dict[str, str]] = []
+    cur: Optional[dict[str, str]] = None
+    for raw in text.replace("\r", "").split("\n"):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        k, v = _kv(raw)
+        if not k:
+            continue
+        if k == "partition_index":
+            cur = {"partition_index": v}
+            blocks.append(cur)
+        elif cur is not None:
+            cur.setdefault(k, v)
+        else:
+            info.setdefault(k, v)
+
+    parts: list[MtkPart] = []
+    seen: set[str] = set()
+    for b in blocks:
+        g = lambda t: b.get(t, "").strip()  # noqa: E731
+        name = g("partition_name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        parts.append(MtkPart(
+            index=g("partition_index"),
+            name=name,
+            file_name=g("file_name") or "NONE",
+            is_download=g("is_download").lower() == "true",
+            ptype=g("type") or "NORMAL_ROM",
+            linear_addr=_int(g("linear_start_addr")),
+            phys_addr=_int(g("physical_start_addr")),
+            size=_int(g("partition_size")),
+            region=g("region") or "EMMC_USER",
+            storage=g("storage") or "HW_STORAGE_EMMC",
+            operation_type=g("operation_type") or "UPDATE",
+            reserve=g("reserve") or "0x00",
+            boundary_check=g("boundary_check") or "true",
+            is_reserved=g("is_reserved") or "false",
+        ))
+    return ScatterDoc(info.get("platform", ""), info.get("project", ""),
+                      info.get("config_version", ""), info.get("storage", ""),
+                      info.get("boot_channel", ""), info.get("block_size", ""),
+                      parts)
+
+
+def parse_xml(xml_text: str) -> ScatterDoc:
     """Parse the MTK scatter XML into a ScatterDoc. The table is often repeated
     in the file (e.g. a second storage block); partitions are de-duplicated by
     partition_name, first occurrence wins."""
