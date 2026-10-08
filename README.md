@@ -43,6 +43,11 @@ Works on TCL-made Android devices (TCL, REVVL, Alcatel).
   scatter XML, so devices that ship TCL's `.sca` instead (e.g. T611B) got "No
   MTK scatter in this folder". The `.sca` *is* an MTK scatter — the text form
   SP Flash Tool loads — and is now read directly.
+* **GUI: partition names load again on recent PySide6.** Load handed Qt a
+  string where it wanted a bool; newer PySide6 rejects that, so Load stopped
+  before naming unnamed partitions (they showed as bare FILE_IDs).
+* Files TCL's CDN no longer has (expired OTA deltas) say so, instead of a
+  generic "probe failed" that invited retrying forever.
 * Re-running a pull no longer mistakes a short 4.x image for a complete one.
 * `--only` accepts FILE_IDs (devices without a `.sca` have no names to match),
   and selecting nothing is an error instead of a green "0/0 files".

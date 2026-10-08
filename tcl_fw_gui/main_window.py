@@ -804,8 +804,10 @@ class MainWindow(QMainWindow):
             self._log(f"  {len(low)} low-confidence left as-is (verify): "
                       + ", ".join(f"{m.probe.fname}~{m.part.file_name}" for m in low))
         scat = os.path.basename(result.scatter_path or "scatter.txt")
-        self._status(f"Flashable: renamed {len(conf)} partitions, wrote {scat}. "
-                     f"Load it in SP Flash Tool / mtkclient.")
+        moved = sum(1 for m in conf if m.new_name and m.new_name != m.probe.fname)
+        self._status(f"Flashable: {len(conf)} partitions mapped ({moved} renamed), "
+                     f"wrote {scat}. Load it in SP Flash Tool / mtkclient (newer "
+                     f"devices also need a signed DA, which TCL doesn't serve).")
         self._log(f"  scatter → {scat}")
 
     def _on_pack_failed(self, msg: str) -> None:

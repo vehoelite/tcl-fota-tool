@@ -333,8 +333,9 @@ def _run_pack(outdir: str, dry_run: bool = False, min_conf: float = 0.7) -> None
     console.print(tbl)
 
     path = flashpack.apply(outdir, result, dry_run=dry_run, min_confidence=min_conf)
+    moved = sum(1 for m in conf if m.new_name and m.new_name != m.probe.fname)
     verb = "would rename" if dry_run else "renamed"
-    console.print(f"[green]✓[/] {verb} {len(conf)} partitions; "
+    console.print(f"[green]✓[/] {len(conf)} partitions mapped ({verb} {moved}); "
                   f"scatter → [bold]{os.path.basename(path)}[/]")
     if low:
         console.print(f"\n[yellow]{len(low)} low-confidence[/] (left as-is — verify by hand):")
@@ -343,7 +344,9 @@ def _run_pack(outdir: str, dry_run: bool = False, min_conf: float = 0.7) -> None
                           f"[dim]({m.confidence:.2f} {m.how})[/]")
     if result.unmapped:
         console.print(f"[dim]unmapped: {', '.join(p.fname for p in result.unmapped)}[/]")
-    console.print("\n[dim]Flash with SP Flash Tool (load the scatter) or mtkclient.[/]")
+    console.print("\n[dim]Load the scatter in SP Flash Tool or mtkclient. Newer devices "
+                  "also need a signed Download Agent (DA) and auth file, which TCL's "
+                  "update servers do not provide.[/]")
 
 
 @app.command()
