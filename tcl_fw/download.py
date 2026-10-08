@@ -57,6 +57,12 @@ def _content_range_total(cr: Optional[str]) -> Optional[int]:
     return None
 
 
+def crc_trusted(entry: dict) -> bool:
+    """True when a zip entry's CRC-32 is in its local header (general-purpose
+    flag bit 3 clear), so stream_unwrap can check it."""
+    return not (entry.get("flags", 0) & 0x08)
+
+
 def stream_unwrap(slave: str, rel: str, dest: str, entry: dict,
                   on_progress: ProgressCb = None, timeout: int = 120,
                   tail: bytes = b"") -> tuple[int, str, int]:
@@ -88,7 +94,7 @@ def stream_unwrap(slave: str, rel: str, dest: str, entry: dict,
     remaining = csz if 0 < csz < 0xFFFFFFFF else None
     if dec is None and remaining is None:
         raise IOError("stored zip entry of unknown length - cannot unwrap safely")
-    state ={"skip": skip, "remaining": remaining, "written": 0}
+    state = {"skip": skip, "remaining": remaining, "written": 0, "crc": 0}
 
     def feed(chunk: bytes, f) -> None:
         if state["skip"]:
@@ -105,6 +111,7 @@ def stream_unwrap(slave: str, rel: str, dest: str, entry: dict,
             if out:
                 f.write(out)
                 state["written"] += len(out)
+                state["crc"] = zlib.crc32(out, state["crc"])
 
     raw = 0
     with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
@@ -127,6 +134,7 @@ def stream_unwrap(slave: str, rel: str, dest: str, entry: dict,
             if out:
                 f.write(out)
                 state["written"] += len(out)
+                state["crc"] = zlib.crc32(out, state["crc"])
 
     # A short stream yields a short image. Silently writing a truncated
     # system.img is the dangerous outcome here — someone could flash it — so
@@ -144,6 +152,15 @@ def stream_unwrap(slave: str, rel: str, dest: str, entry: dict,
         raise IOError(
             "wrapped payload ended early after %d body + %d footer bytes "
             "(the download is incomplete)" % (raw, len(tail)))
+    # The zip records a CRC-32 of the whole uncompressed image. When it sits in
+    # the local header (no data descriptor), it proves every byte we wrote -
+    # including for files where checksum.php publishes no BODY hash.
+    if crc_trusted(entry) and state["crc"] != entry.get("crc", 0):
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise IOError("unwrapped image fails the zip's CRC-32 (corrupt download)")
     return state["written"], h.hexdigest(), raw
 
 

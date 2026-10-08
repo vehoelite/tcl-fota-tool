@@ -25,7 +25,8 @@ from typing import Callable, Optional
 
 from . import fota, manifest as manifest_mod, naming
 from .crypto import decrypt_header
-from .download import fetch_checksums, sha1_file, stream_body, stream_unwrap
+from .download import (crc_trusted, fetch_checksums, sha1_file, stream_body,
+                       stream_unwrap)
 from .fota import DownloadInfo, FileEntry
 
 # How much of a body to fetch for content-naming: enough to un-sparse block 0
@@ -343,7 +344,10 @@ def _pull_image(plan: PullPlan, f: FileEntry, bs: int, name: str, dest: str,
         if cs and cs.body and body_sha != cs.body:
             return fail("body checksum mismatch")
         os.replace(part, dest)
-        ok = checked and bool(cs and cs.body)
+        # Proven when the footer matched FOOTER and the body is covered either
+        # by BODY or by the zip's own CRC-32 over the whole inflated image
+        # (stream_unwrap raises on a CRC mismatch).
+        ok = checked and bool((cs and cs.body) or crc_trusted(wrapped[2]))
         return PartResult(f.file_id, name, kind, size=got, path=dest,
                           verified=True if ok else None, collided=collided)
 

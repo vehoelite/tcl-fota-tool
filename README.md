@@ -19,6 +19,36 @@ Works on TCL-made Android devices (TCL, REVVL, Alcatel).
 
 ---
 
+## What's new in 4.4.0 — byte-exact images
+
+**Every large-partition image pulled with 4.x was incomplete. Re-pull with
+4.4.0, and do not flash images pulled with an earlier 4.x release.**
+
+* **Large partitions were missing their final 4 MiB** ([#15]). TCL serves each
+  partition as a body plus an encrypted header blob, and for large partitions
+  that blob is the image's last 4 MiB. 4.x saved the body alone. Sparse images
+  (`system`, `vendor`, `product`, …) failed `simg2img`; zip containers lost their
+  central directory; and `boot`, `dtbo` and `vendor_dlkm` lost their **AVB
+  footer**, so they would fail verified boot. Every image is now
+  `body + decrypt(header blob)`, on the zip-wrapped path too.
+* **Header images kept their padding** ([#16]). The blob is standard PKCS#7, but
+  the old trimmer looked for a "dominant filler block" that isn't there and
+  removed nothing — so `vbmeta`, `lk`, `superheader`, … were 1–16 bytes too long.
+  Padding is now stripped exactly, and invalid padding is refused.
+* **Checksums were never actually checked.** `checksum.php` answers in XML; the
+  parser expected JSON, failed, and quietly returned nothing. Every byte of every
+  image is now verified against TCL's own SHA-1s, mismatches write nothing, and
+  anything that *couldn't* be verified is reported as such.
+* Re-running a pull no longer mistakes a short 4.x image for a complete one.
+* `--only` accepts FILE_IDs (devices without a `.sca` have no names to match),
+  and selecting nothing is an error instead of a green "0/0 files".
+
+Thanks to **[@jgroman](https://github.com/jgroman)** for the precise diagnosis
+of both #15 and #16.
+
+[#15]: https://github.com/vehoelite/tcl-fota-tool/issues/15
+[#16]: https://github.com/vehoelite/tcl-fota-tool/issues/16
+
 ## What's new in 4.3.1 — safety patch
 
 A review of the naming path found three ways the tool could write the **wrong
@@ -187,24 +217,35 @@ refuses.
 
 ## How it works
 
-TCL's FOTA server delivers each partition in one of two ways, and `tcl-fw`
-handles both automatically:
+TCL's FOTA server splits every partition into two parts, and the flashable
+image is always
 
-- **Large partitions** (`super`, `system`, `vendor`, `boot`, `md1img`, …) — the
-  plaintext **body** *is* the image; it's streamed straight to disk (with resume
-  and SHA-1 verification against the server's `checksum.php`).
-- **Small partitions** (`lk`, `preloader`, `tee`/`atf`, `vbmeta`, `spmfw`,
-  `scatter`, …) — the body is empty; the real image lives inside an encrypted
-  ~4 MiB header fetched from `encrypt_header.php`. That blob is **AES-128-ECB**
-  with the single universal key
+```
+image = body  +  decrypt(header blob)
+```
+
+- The **body** is plaintext, streamed from the download CDN (with resume).
+- The **header blob** comes from `encrypt_header.php`. For a **large** partition
+  (`system`, `vendor`, `boot`, …) it holds the image's **final 4 MiB** — which
+  carries things like the AVB footer and the end of a sparse chunk table. For a
+  **small** partition (`lk`, `preloader`, `tee`, `vbmeta`, the scatter, …) the
+  body is empty and the blob is the whole image.
+
+  The blob is **AES-128-ECB** with the single universal key
 
   ```
   KEY = ascii( md5("TeleExtTest" + "t0523" + "jP7GHdmuBz").hexdigest()[:16] )
       = e26baba108b08a28
   ```
 
-  The header is padded with a constant filler block, which `tcl-fw` detects and
-  trims to recover the exact image.
+  over standard **PKCS#7**-padded plaintext, which `tcl-fw` strips exactly —
+  and refuses, rather than guesses, if the padding isn't valid.
+
+**Every byte is verified.** `checksum.php` publishes a SHA-1 of the body
+(`BODY`) and of the decrypted, unpadded blob (`FOOTER`). `tcl-fw` checks both
+for every partition, verifies the blob *before* downloading a multi-GB body, and
+on any mismatch writes nothing. If the server offers no checksum the image is
+still written but reported as **unverified**, never silently passed.
 
 Partitions are named from the **best evidence available**, and the tool is
 explicit about which it had. In order of preference `tcl-fw` uses:
@@ -243,8 +284,10 @@ has no readable central directory).
 
 `tcl-fw` **unwraps these in-flight**: the container is inflated as it downloads,
 so what lands on disk is `system.img` — the real partition image — and the
-720 MB archive is never written at all. The bytes are hashed *as served*, so the
-server's SHA-1 still verifies. A short body is rejected and the partial image
+720 MB archive is never written at all. The container's last 4 MiB arrive in
+the header blob, and the deflate stream runs straight across that seam, so the
+decrypted blob is fed through the same inflater after the body. The body bytes
+are hashed *as served*, so the server's SHA-1 still verifies. A short body is rejected and the partial image
 deleted rather than left looking complete.
 
 Zips that hold ordinary files (`system.map`, `vendor.map`, the `target_files`

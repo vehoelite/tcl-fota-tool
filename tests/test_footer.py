@@ -81,7 +81,8 @@ def server(cdn, monkeypatch):
     monkeypatch.setattr(fota, "fetch_header", lambda enc, rel, **k: blobs.get(rel, b""))
     monkeypatch.setattr(puller, "fetch_checksums", lambda enc, rel, **k: sums.get(rel))
 
-    def add(fid, body, footer, checksums=True, footer_sum=None, body_sum=None):
+    def add(fid, body, footer, checksums=True, footer_sum=None, body_sum=None,
+            no_body_sum=False):
         rel = "/body/x/%s" % fid
         _Bodies.bodies[rel] = body
         blobs[rel] = _encrypt(footer)
@@ -89,7 +90,8 @@ def server(cdn, monkeypatch):
             sums[rel] = parse_checksums(
                 "<GOTU><FILE_CHECKSUM_LIST><FILE><ADDRESS>%s</ADDRESS>"
                 "<FOOTER>%s</FOOTER><BODY>%s</BODY></FILE></FILE_CHECKSUM_LIST></GOTU>"
-                % (rel, footer_sum or sha1(footer), body_sum or sha1(body)), rel)
+                % (rel, footer_sum or sha1(footer),
+                   "" if no_body_sum else (body_sum or sha1(body))), rel)
         return FileEntry(fid, rel)
 
     def plan(files, heads=None):
@@ -198,6 +200,32 @@ def test_wrapped_partition_inflates_across_body_and_footer(server, tmp_path, foo
     assert r.error is None, r.error
     assert r.verified is True
     assert (tmp_path / "p9.img").read_bytes() == image  # the image, not the zip
+
+
+def test_wrapped_partition_is_proven_by_zip_crc_when_server_has_no_body_hash(
+        server, tmp_path):
+    """Seen live on 5033E system: checksum.php gives FOOTER but no BODY. The
+    zip's CRC-32 over the inflated image still proves every byte."""
+    image = b"\x3a\xff\x26\xed" + os.urandom(50_000)
+    container = _wrapped(image)
+    body, footer = container[:-3000], container[-3000:]
+    f = server("11", body, footer, no_body_sum=True)
+    p = server.plan([f], heads={"11": body[:65536]})
+    r = puller.pull_one(p, f, str(tmp_path))
+    assert r.error is None and r.verified is True
+    assert (tmp_path / "p11.img").read_bytes() == image
+
+
+def test_wrapped_partition_failing_zip_crc_is_refused(server, tmp_path):
+    image = b"\x3a\xff\x26\xed" + os.urandom(50_000)
+    container = bytearray(_wrapped(image))
+    container[14:18] = (int.from_bytes(container[14:18], "little") ^ 1).to_bytes(4, "little")
+    body, footer = bytes(container[:-3000]), bytes(container[-3000:])
+    f = server("12", body, footer, no_body_sum=True)
+    p = server.plan([f], heads={"12": body[:65536]})
+    r = puller.pull_one(p, f, str(tmp_path))
+    assert r.error and "CRC" in r.error
+    assert not list(tmp_path.iterdir())
 
 
 def test_wrapped_partition_without_its_footer_is_refused(server, tmp_path, monkeypatch):

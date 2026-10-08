@@ -218,9 +218,21 @@ def pull(
         if want:
             nm = (plan.names.get(f.file_id) or "").lower()
             stem = os.path.splitext(nm)[0]
-            if not any(stem == w or stem.startswith(w) for w in want):
+            by_name = stem and any(stem == w or stem.startswith(w) for w in want)
+            if not (by_name or f.file_id in want):
                 continue
         todo.append(f)
+
+    if not todo:
+        # Selecting nothing is not a successful pull. On devices with no .sca
+        # there are no server names to match, only FILE_IDs.
+        console.print(f"[red]Nothing selected.[/] --only {only or ''} --small={small} "
+                      "matched no file.")
+        if want and not plan.names:
+            console.print("[dim]This device serves no scatter, so names are only "
+                          "known after identification. Run [bold]tcl-fw list "
+                          f"{curef}[/] and pass FILE_IDs: --only 664534,664535[/]")
+        raise typer.Exit(1)
 
     results = []
     progress = Progress(
