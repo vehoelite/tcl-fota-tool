@@ -323,8 +323,10 @@ class PackWorker(QThread):
 class PullWorker(QThread):
     """Pull a chosen subset of files, decrypting headers / streaming bodies."""
 
-    file_started = Signal(str, str, int)     # file_id, name, total (0 = unknown)
-    file_progress = Signal(str, int, int)    # file_id, got, total
+    # object, not int: a C int overflows past 2 GiB and system images are 3+ GB
+    # (seen live as an OverflowError in the GUI).
+    file_started = Signal(str, str, object)  # file_id, name, total (0 = unknown)
+    file_progress = Signal(str, object, object)  # file_id, got, total
     file_done = Signal(object)               # PartResult
     finished_all = Signal(list, str)         # [PartResult], manifest_path
     failed = Signal(str)
@@ -363,6 +365,14 @@ class PullWorker(QThread):
     def run(self) -> None:
         try:
             os.makedirs(self._outdir, exist_ok=True)
+        except OSError as e:
+            # A folder the user can't write to is their choice to fix, not a
+            # tcl-fw bug - say so plainly instead of reporting a crash.
+            self.failed.emit(f"Can't create or write to the output folder "
+                             f"({e.strerror or type(e).__name__}). Choose a folder "
+                             f"you have write access to, e.g. in Documents.")
+            return
+        try:
             results: list[PartResult] = []
             with ThreadPoolExecutor(max_workers=self._concurrency) as ex:
                 futs = [ex.submit(self._pull_one, f) for f in self._files]

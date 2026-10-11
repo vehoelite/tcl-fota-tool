@@ -71,6 +71,36 @@ def test_load_reaches_the_background_name_probe(window):
     assert len(window._probes_started) == 1
 
 
+def test_progress_signals_carry_sizes_over_2_gib(app):
+    """Seen live as OverflowError: the progress signals were C ints, and system
+    images are 3+ GB."""
+    from tcl_fw_gui.workers import PullWorker
+    w = PullWorker(None, [], "unused")
+    got = []
+    w.file_started.connect(lambda fid, name, total: got.append(total))
+    w.file_progress.connect(lambda fid, done, total: got.append((done, total)))
+    big = 3_145_925_308
+    w.file_started.emit("1", "system.img", big)
+    w.file_progress.emit("1", big - 1, big)
+    assert got == [big, (big - 1, big)]
+
+
+def test_unwritable_output_folder_is_a_clear_message(app, tmp_path, monkeypatch):
+    from tcl_fw_gui import workers
+    w = workers.PullWorker(None, [], str(tmp_path / "out"))
+    msgs, reports = [], []
+    w.failed.connect(msgs.append)
+    monkeypatch.setattr(workers.reporting, "report_exception",
+                        lambda *a, **k: reports.append(a))
+
+    def deny(*a, **k):
+        raise PermissionError(13, "Access is denied")
+    monkeypatch.setattr(workers.os, "makedirs", deny)
+    w.run()
+    assert msgs and "write access" in msgs[0]
+    assert reports == []               # a user's folder choice is not a crash
+
+
 def test_filter_hides_and_shows_rows(window):
     info, plan = _plan()
     window._on_loaded("X-1", info, plan)

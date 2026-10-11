@@ -19,6 +19,34 @@ Works on TCL-made Android devices (TCL, REVVL, Alcatel).
 
 ---
 
+## What's new in 4.5.1 — the first bug the community caught
+
+**If you're on 4.4.0 or 4.5.0, update: pulls are currently failing.** Around
+2026-10-09, TCL's encrypted-header server started answering with HTTP `206`
+instead of `200`. The data is identical and complete — it still matches TCL's
+own checksums byte for byte — but 4.4.0/4.5.0 only accepted `200`, so every
+header was thrown away: small partitions were skipped ("no name") and large
+ones were rejected ("footer missing").
+
+**Nobody had to file an issue for this.** It was caught by the anonymous error
+reports added in 4.5.0: within days, `no_name` and `footer_missing` showed up
+from several devices at once, which pointed straight at the cause. Thank you
+to everyone who left sharing switched on — this is exactly what it's for.
+
+Also fixed, from the same reports:
+
+* **Large downloads in the desktop app** no longer hit an `OverflowError` and
+  lose their progress bar: progress for files over 2 GB (system images are 3+
+  GB) overflowed a 32-bit counter.
+* **A genuinely empty partition** (TCL's checksum is that of an empty file) is
+  written as a verified zero-byte file instead of being reported as a failure.
+* **When TCL's server returns an error page** instead of its usual response,
+  you get a plain "the update server returned an invalid response — try again"
+  instead of a parser traceback.
+* **Choosing an output folder you can't write to** now says so plainly.
+* Release downloads are versioned (`tcl-fw.v4.5.1.exe`) and built automatically
+  from the release tag.
+
 ## What's new in 4.5.0 — bugs report themselves
 
 * **Anonymous error reports**, under the same opt-out switch as device sharing

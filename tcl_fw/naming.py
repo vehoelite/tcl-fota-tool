@@ -246,6 +246,8 @@ def magic_name(b: bytes) -> tuple[str, str]:
         return "pe", "bin"
     if b[:8] == b"\x00" * 8:
         return "zero", "img"
+    if not b:
+        return "empty", "bin"                     # a zero-byte partition
     return "part_%s" % b[:4].hex(), "bin"
 
 

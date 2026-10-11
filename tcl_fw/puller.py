@@ -316,6 +316,15 @@ def _pull_image(plan: PullPlan, f: FileEntry, bs: int, name: str, dest: str,
     else:
         foot = b""
     if is_small and not foot:
+        if cs and cs.footer == _sha1(b"") and len(enc) >= 16:
+            # A genuinely empty partition: TCL's own checksum is the SHA-1 of
+            # nothing, and the blob is a lone padding block. Write the
+            # zero-byte file - it is correct, not a failure.
+            with open(part, "wb"):
+                pass
+            os.replace(part, dest)
+            return PartResult(f.file_id, name, kind, size=0, path=dest,
+                              verified=True, collided=collided)
         return fail("empty header", "empty_header")
     if cs and cs.footer:
         if not foot:
@@ -410,7 +419,7 @@ def write_manifest(curef: str, plan: PullPlan, results: list[PartResult],
     info = plan.info
     doc = {
         "curef": curef, "tv": info.tv, "fw_id": info.fw_id,
-        "generated_by": "tcl-fw 4.5.0",
+        "generated_by": "tcl-fw 4.5.1",
         "credit": "header decryption by Littlenine Ennea (github.com/LittlenineEnnea)",
         "slave": info.slave, "encslave": info.encslave,
         "files": [

@@ -83,6 +83,11 @@ def vk(params: "OrderedDict[str, str]", secret: str) -> str:
     return hashlib.sha1(q.encode()).hexdigest()
 
 
+class ServerError(RuntimeError):
+    """TCL's FOTA server answered with something that isn't its XML (an error
+    page, an empty body). Usually temporary on TCL's side."""
+
+
 def _post_xml(path: str, params: dict, timeout: int = 30) -> ET.Element:
     req = urllib.request.Request(
         "https://%s/%s" % (SERVER, path),
@@ -90,7 +95,14 @@ def _post_xml(path: str, params: dict, timeout: int = 30) -> ET.Element:
         headers={"User-Agent": USER_AGENT},
     )
     raw = urllib.request.urlopen(req, timeout=timeout, context=_SSL).read()
-    return ET.fromstring(raw.decode("utf-8", "replace"))
+    try:
+        return ET.fromstring(raw.decode("utf-8", "replace"))
+    except ET.ParseError:
+        # Seen live: request_download occasionally returns a non-XML page.
+        raise ServerError(
+            "TCL's update server returned an invalid response to %s "
+            "(not XML, %d bytes) - it is usually temporary, try again in a "
+            "few minutes" % (path, len(raw))) from None
 
 
 def discover(curef: str, fv: str = "000000", mode: int = 4) -> tuple[Optional[str], Optional[str]]:
@@ -169,7 +181,11 @@ def fetch_header(encslave: str, rel: str, timeout: int = 120) -> bytes:
         )
         resp = conn.getresponse()
         data = resp.read()
-        return data if resp.status == 200 else b""
+        # Any 2xx carries the blob: since ~2026-10-09 the server answers 206
+        # (with no Content-Range) for complete, checksum-valid blobs. Accepting
+        # only 200 discarded every header for every device. Integrity is
+        # enforced downstream (strict PKCS#7 + the FOOTER checksum), not here.
+        return data if 200 <= resp.status < 300 else b""
     finally:
         conn.close()
 

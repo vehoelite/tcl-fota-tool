@@ -24,6 +24,7 @@ from tcl_fw.fota import DownloadInfo, FileEntry
 from tcl_fw.puller import PullPlan
 
 sha1 = lambda b: hashlib.sha1(b).hexdigest()
+_REAL_FETCH_HEADER = fota.fetch_header      # the `server` fixture stubs it out
 
 
 def _encrypt(plain: bytes) -> bytes:
@@ -198,13 +199,13 @@ def test_no_footer_listed_means_no_header_fetch(server, tmp_path, monkeypatch):
     assert (tmp_path / "p13.img").read_bytes() == body
 
 
-def test_error_page_from_header_endpoint_is_not_decrypted(monkeypatch):
-    """fetch_header must return nothing for a non-200, not the error body."""
+def _fake_header_server(monkeypatch, status, body):
     class Resp:
-        status = 502
+        def __init__(self):
+            self.status = status
 
         def read(self):
-            return b"<html>502 Bad Gateway</html>" * 4
+            return body
 
     class Conn:
         def __init__(self, *a, **k):
@@ -220,7 +221,54 @@ def test_error_page_from_header_endpoint_is_not_decrypted(monkeypatch):
             pass
 
     monkeypatch.setattr(fota.http.client, "HTTPConnection", Conn)
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 404, 403, 301])
+def test_error_page_from_header_endpoint_is_not_decrypted(monkeypatch, status):
+    """fetch_header must return nothing for an error status, not the error body."""
+    _fake_header_server(monkeypatch, status, b"<html>Bad Gateway</html>" * 4)
     assert fota.fetch_header("enc", "/x") == b""
+
+
+@pytest.mark.parametrize("status", [200, 206])
+def test_header_blob_is_accepted_on_any_success_status(monkeypatch, status):
+    """Seen live from 2026-10-09: encrypt_header.php answers 206 for complete,
+    checksum-valid blobs. 4.4.0-4.5.0 accepted only 200, so every header was
+    discarded - every small partition skipped, every large one failed."""
+    blob = _encrypt(b"AVB0" + b"\x00" * 4092)
+    _fake_header_server(monkeypatch, status, blob)
+    assert fota.fetch_header("enc", "/x") == blob
+
+
+def test_a_genuinely_empty_partition_is_written_and_verified(server, tmp_path):
+    """Seen live (T810S 879826): FOOTER is sha1(b'') and the blob is one pad
+    block. That is a real zero-byte partition, not an error."""
+    f = server("empty", b"", b"")
+    r = puller.pull_one(server.plan([f]), f, str(tmp_path))
+    assert r.error is None and r.verified is True and r.size == 0
+    assert (tmp_path / "pempty.img").read_bytes() == b""
+
+
+def test_non_xml_from_tcl_is_a_clear_server_error(monkeypatch):
+    class R:
+        def read(self):
+            return b"<html><body>502 Bad Gateway</body></html"
+    monkeypatch.setattr(fota.urllib.request, "urlopen", lambda *a, **k: R())
+    with pytest.raises(fota.ServerError, match="invalid response"):
+        fota.request_download("X-1", "TV", "1")
+
+
+def test_a_206_header_pulls_end_to_end(server, tmp_path, monkeypatch):
+    """The live failure, end to end: a 206 header must produce a verified
+    image, not 'no name' / 'footer missing'."""
+    image = b"AVB0" + b"\x00" * 8188
+    f = server("206", b"", image)
+    blob = _encrypt(image)
+    monkeypatch.setattr(fota, "fetch_header", _REAL_FETCH_HEADER)  # real status check
+    _fake_header_server(monkeypatch, 206, blob)
+    r = puller.pull_one(server.plan([f]), f, str(tmp_path))
+    assert r.error is None and r.verified is True
+    assert (tmp_path / "p206.img").read_bytes() == image
 
 
 # ── #15 on the zip-wrapped path: the deflate stream crosses the seam ─────────
