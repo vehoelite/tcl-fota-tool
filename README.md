@@ -112,9 +112,10 @@ pip install "tcl-fw[gui]"   # CLI + desktop app (PySide6)
 pip install "tcl-fw[verify]" # + signature verification (cryptography + pyasn1)
 ```
 
-Or grab the standalone `tcl-fw` / `tcl-fw.exe` (CLI) or `tcl-fw-gui.exe`
-(desktop app) from
+Or grab the standalone `tcl-fw.v<version>.exe` (CLI) or
+`tcl-fw-gui.v<version>.exe` (desktop app) from
 [Releases](https://github.com/vehoelite/tcl-fota-tool/releases) — no Python needed.
+They're built automatically from the release tag in a clean environment.
 
 ## Desktop app
 

@@ -1,10 +1,12 @@
 name: build-windows
 
 # Build the standalone Windows executables (PyInstaller can't cross-compile,
-# so this runs on a real Windows runner). Produces:
-#   - tcl-fw.exe       (CLI)
-#   - tcl-fw-gui.exe   (PySide6 desktop app)
+# so this runs on a real Windows runner). Produces, versioned for reference:
+#   - tcl-fw.v<version>.exe       (CLI)
+#   - tcl-fw-gui.v<version>.exe   (PySide6 desktop app)
 # Downloadable as artifacts on every run; attached to a Release when tagged v*.
+# The version comes from tcl_fw.__version__; a tagged build fails if the tag,
+# __version__ and pyproject.toml don't all agree, so a mislabelled exe can't ship.
 
 on:
   push:
@@ -34,24 +36,46 @@ jobs:
           python -m pytest -q
           python -c "import tcl_fw, tcl_fw_gui; print('import OK')"
 
+      - name: Check version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = python -c "import tcl_fw; print(tcl_fw.__version__)"
+          $p = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          if ($v -ne $p) { Write-Error "tcl_fw.__version__ ($v) != pyproject.toml ($p)"; exit 1 }
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $tag = $env:GITHUB_REF_NAME.Substring(1)
+            if ($tag -ne $v) { Write-Error "tag v$tag does not match the code's version $v"; exit 1 }
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Output "Building version $v"
+
       - name: Build CLI exe
         run: pyinstaller tcl-fw.spec
 
       - name: Build GUI exe
         run: pyinstaller tcl-fw-gui.spec
 
+      - name: Put the version in the filenames
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          Rename-Item dist/tcl-fw.exe "tcl-fw.v$v.exe"
+          Rename-Item dist/tcl-fw-gui.exe "tcl-fw-gui.v$v.exe"
+          Get-ChildItem dist/*.exe | Format-Table Name, Length
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: tcl-fw-windows
+          name: tcl-fw-windows-v${{ steps.ver.outputs.version }}
           path: |
-            dist/tcl-fw.exe
-            dist/tcl-fw-gui.exe
+            dist/tcl-fw.v${{ steps.ver.outputs.version }}.exe
+            dist/tcl-fw-gui.v${{ steps.ver.outputs.version }}.exe
 
       - name: Attach to Release (tagged builds only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/tcl-fw.exe
-            dist/tcl-fw-gui.exe
+            dist/tcl-fw.v${{ steps.ver.outputs.version }}.exe
+            dist/tcl-fw-gui.v${{ steps.ver.outputs.version }}.exe
