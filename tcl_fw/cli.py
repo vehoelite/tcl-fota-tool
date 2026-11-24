@@ -83,7 +83,7 @@ def _auto_curef(curef: Optional[str]) -> tuple[str, Optional[str], Optional[str]
         dev = adb.detect()
         if dev and dev.curef:
             console.print(f"[green]Detected device[/]: {dev.name or dev.model} "
-                          f"→ curef [bold]{dev.curef}[/]")
+                          f"-> curef [bold]{dev.curef}[/]")
             return dev.curef, None, dev.fv, dev.name
     raise typer.BadParameter(
         "no curef given and no phone detected. Pass a curef "
@@ -208,7 +208,7 @@ def pull(
     out = outdir or f"pkg_{curef.replace('/', '_')}"
     os.makedirs(out, exist_ok=True)
     console.print(f"\n[bold]{curef}[/]  tv={tv} fw_id={fw_id}  "
-                  f"{len(info.files)} files → [bold]{out}/[/]\n")
+                  f"{len(info.files)} files -> [bold]{out}/[/]\n")
 
     with console.status("Probing bodies + resolving names…"):
         plan = puller.build_plan(curef, info, mode=mode)
@@ -270,7 +270,7 @@ def pull(
     reporting.report_pull(results, curef, tv, fw_id, mode)
     ok = sum(1 for r in results if not r.error)
     dec = sum(1 for r in results if r.kind == "header" and not r.error)
-    console.print(f"\n[green]✓[/] {ok}/{len(todo)} files → {out}/  "
+    console.print(f"\n[green]✓[/] {ok}/{len(todo)} files -> {out}/  "
                   f"[dim]({dec} decrypted from headers)[/]")
     console.print(f"[dim]manifest: {mpath}[/]")
 
@@ -331,7 +331,7 @@ def _run_pack(outdir: str, dry_run: bool = False, min_conf: float = 0.7) -> None
 
     tbl = Table(header_style="bold", title=f"{result.doc.platform} · {result.doc.project}")
     tbl.add_column("current file", style="dim", no_wrap=True)
-    tbl.add_column("→ partition", style="green", no_wrap=True)
+    tbl.add_column("-> partition", style="green", no_wrap=True)
     tbl.add_column("conf", justify="right")
     tbl.add_column("how")
     for m in conf:
@@ -342,7 +342,7 @@ def _run_pack(outdir: str, dry_run: bool = False, min_conf: float = 0.7) -> None
     moved = sum(1 for m in conf if m.new_name and m.new_name != m.probe.fname)
     verb = "would rename" if dry_run else "renamed"
     console.print(f"[green]✓[/] {len(conf)} partitions mapped ({verb} {moved}); "
-                  f"scatter → [bold]{os.path.basename(path)}[/]")
+                  f"scatter -> [bold]{os.path.basename(path)}[/]")
     if low:
         console.print(f"\n[yellow]{len(low)} low-confidence[/] (left as-is — verify by hand):")
         for m in low:
@@ -383,7 +383,7 @@ def decrypt(
     dest = out or (blob + ".dec")
     with open(dest, "wb") as f:
         f.write(img)
-    console.print(f"{blob} → [green]{dest}[/]  "
+    console.print(f"{blob} -> [green]{dest}[/]  "
                   f"({len(img):,} B, looks like [bold]{name}[/], starts {img[:8].hex()})")
 
 
@@ -617,6 +617,7 @@ def verify_cmd(
 def main() -> None:
     """Console entry point: run the CLI, and report an unexpected crash (its
     type and tcl-fw frames only - see reporting.py) before Typer prints it."""
+    _safe_console()
     try:
         app()
     except (SystemExit, KeyboardInterrupt):
@@ -625,7 +626,29 @@ def main() -> None:
         cmd = sys.argv[1] if len(sys.argv) > 1 else "other"
         reporting.report_exception(e, cmd if cmd in reporting.COMMANDS else "other",
                                    block=True)
+        if fota.is_transient(e):
+            # Error reports: 41 'list' runs ended in a ServerError TRACEBACK although the message was written
+            # for people. A temporary server or network problem gets a plain message (already retried).
+            console.print(f"[red]{_plain_error(e)}[/]")
+            raise SystemExit(1) from None
         raise
+
+
+def _plain_error(e: BaseException) -> str:
+    if isinstance(e, fota.ServerError):
+        return f"{e} (already retried {len(fota.RETRY_DELAYS)} times)."
+    return (f"Network problem talking to TCL's servers ({type(e).__name__}), already retried "
+            f"{len(fota.RETRY_DELAYS)} times. Check the connection and try again in a few minutes.")
+
+
+def _safe_console() -> None:
+    """Never die on a character the console cannot show (error reports: UnicodeEncodeError on Windows consoles
+    with a legacy code page killed 'pull' before it downloaded anything)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ import http.client
 import random
 import ssl
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -88,7 +89,40 @@ class ServerError(RuntimeError):
     page, an empty body). Usually temporary on TCL's side."""
 
 
+#: Retries for a transient failure (TCL's server answering an error page, a dropped or timed-out connection).
+#: The error reports showed request_download returning a non-XML page 41 times, and the GUI dying on a single
+#: connection reset or timeout; one or two quick retries turn most of those into a normal pull.
+RETRY_DELAYS = (2.0, 5.0)
+
+
+def is_transient(exc: BaseException) -> bool:
+    """A failure worth retrying (and worth a plain 'try again' message, not a crash)."""
+    import socket
+
+    if isinstance(exc, ServerError):
+        return True
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500 or exc.code == 429
+    return isinstance(exc, (urllib.error.URLError, ConnectionError, TimeoutError, socket.timeout,
+                            http.client.HTTPException, ssl.SSLError))
+
+
+def _retry(fn, *args, **kw):
+    for delay in (*RETRY_DELAYS, None):
+        try:
+            return fn(*args, **kw)
+        except Exception as e:  # noqa: BLE001 - only transient errors are retried
+            if delay is None or not is_transient(e):
+                raise
+            time.sleep(delay + random.uniform(0, 0.5))
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _post_xml(path: str, params: dict, timeout: int = 30) -> ET.Element:
+    return _retry(_post_xml_once, path, params, timeout)
+
+
+def _post_xml_once(path: str, params: dict, timeout: int = 30) -> ET.Element:
     req = urllib.request.Request(
         "https://%s/%s" % (SERVER, path),
         data=urllib.parse.urlencode(params).encode(),
@@ -166,6 +200,11 @@ def request_download(curef: str, tv: str, fw_id: str,
 
 
 def fetch_header(encslave: str, rel: str, timeout: int = 120) -> bytes:
+    """See _fetch_header_once; a dropped / timed-out connection is retried (GUI crash reports)."""
+    return _retry(_fetch_header_once, encslave, rel, timeout)
+
+
+def _fetch_header_once(encslave: str, rel: str, timeout: int = 120) -> bytes:
     """POST encrypt_header.php on an encrypt slave -> the raw encrypted header
     blob, or b"" if the server answered with anything but 200 (an error page
     must never reach the decryptor as if it were a blob)."""

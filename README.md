@@ -19,6 +19,33 @@ Works on TCL-made Android devices (TCL, REVVL, Alcatel).
 
 ---
 
+## What's new in 4.5.2 — four more bugs the community caught
+
+Every fix in this release came from the anonymous error reports. Nobody had to
+file an issue, and nobody had to send a log. **Thank you to everyone who leaves
+sharing switched on** — it keeps finding real problems, and this is the second
+release built entirely from them.
+
+* **`list` no longer ends in a traceback when TCL's server hiccups.** TCL's
+  update server sometimes answers with an error page instead of its usual reply
+  (reported 41 times, on Windows and macOS). tcl-fw already had a plain message
+  for this, but it was printed as a crash. Now tcl-fw **retries automatically**
+  (twice, a few seconds apart), and if the server is still unwell it says so in
+  one line and exits.
+* **`pull` no longer crashes on some Windows consoles before downloading
+  anything.** A `→` arrow in a status line couldn't be printed by consoles that
+  use an older code page (5 reports). Output now falls back gracefully on any
+  character the console can't show, and tcl-fw's own messages use plain `->`.
+* **One bad file can't stop a whole pull any more.** If TCL's server sends a
+  malformed header for one partition, that partition is skipped and reported
+  (`header_rejected`), and every other partition still downloads. Before, it
+  ended the entire pull (2 reports, macOS). The same guard now covers the
+  partition-name lookup at the start of a pull.
+* **The desktop app rides out network blips.** A dropped or timed-out connection
+  while preparing a pull is now retried instead of failing straight away (4
+  reports), and if it still fails you get a plain "network problem — try again"
+  instead of an exception name.
+
 ## What's new in 4.5.1 — the first bug the community caught
 
 **If you're on 4.4.0 or 4.5.0, update: pulls are currently failing.** Around
@@ -44,7 +71,7 @@ Also fixed, from the same reports:
   you get a plain "the update server returned an invalid response — try again"
   instead of a parser traceback.
 * **Choosing an output folder you can't write to** now says so plainly.
-* Release downloads are versioned (`tcl-fw.v4.5.1.exe`) and built automatically
+* Release downloads are versioned (e.g. `tcl-fw.v4.5.1.exe`) and built automatically
   from the release tag.
 
 ## What's new in 4.5.0 — bugs report themselves

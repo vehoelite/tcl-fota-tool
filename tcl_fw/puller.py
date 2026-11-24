@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import fota, manifest as manifest_mod, naming
+from . import __version__, fota, manifest as manifest_mod, naming
 from .crypto import decrypt_header
 from .download import (crc_trusted, fetch_checksums, sha1_file, stream_body,
                        stream_unwrap)
@@ -62,6 +62,7 @@ class PullPlan:
     # can map to one file_name), so without this two partitions can resolve to
     # the same destination — and a resumed body append itself onto the other.
     claimed: dict[str, str] = field(default_factory=dict)
+    rejected: set = field(default_factory=set)              # FILE_IDs whose header blob was malformed
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def claim(self, name: str, file_id: str) -> tuple[str, bool]:
@@ -109,7 +110,10 @@ def authoritative_names(curef: str, info: DownloadInfo,
             data = b""
     if not data and info.encslave:
         enc = fota.fetch_header(info.encslave, rel)
-        data = decrypt_header(enc) if len(enc) >= 16 else b""
+        try:
+            data = decrypt_header(enc) if len(enc) >= 16 else b""
+        except ValueError:  # a malformed .sca header: no authoritative names, not a failed plan
+            data = b""
     sca = naming.parse_sca(data.decode("latin1", "replace"))
     if not sca:
         return {}
@@ -190,7 +194,14 @@ def _resolve_name(plan: PullPlan, f: FileEntry, is_small: bool) -> Optional[str]
         enc = fota.fetch_header(plan.info.encslave, f.rel_url)
         if len(enc) < 16:
             return None
-        n, e = naming.magic_name(decrypt_header(enc))
+        try:
+            img = decrypt_header(enc)
+        except ValueError:
+            # Error reports (macOS): a header that is not whole AES blocks raised out of here and ended the
+            # WHOLE pull. It is one bad file: skip it as header_rejected and pull the rest.
+            plan.rejected.add(f.file_id)
+            return None
+        n, e = naming.magic_name(img)
         plan.guessed[f.file_id] = "%s_%s.%s" % (n, f.file_id, e)
         return plan.guessed[f.file_id]
     # 64 KiB is enough to un-sparse block 0 (the ext4/f2fs superblock sits at raw
@@ -242,6 +253,9 @@ def pull_one(plan: PullPlan, f: FileEntry, outdir: str,
                               error="body size probe failed - not pulled")
     is_small = bs == 0
     name = _resolve_name(plan, f, is_small)
+    if not name and f.file_id in plan.rejected:
+        return PartResult(f.file_id, "?", "skip", code="header_rejected",
+                          error="the server's header blob for this file is malformed - not pulled")
     if not name:
         return PartResult(f.file_id, "?", "skip", error="no name / empty",
                           code="no_name")
@@ -419,7 +433,7 @@ def write_manifest(curef: str, plan: PullPlan, results: list[PartResult],
     info = plan.info
     doc = {
         "curef": curef, "tv": info.tv, "fw_id": info.fw_id,
-        "generated_by": "tcl-fw 4.5.1",
+        "generated_by": f"tcl-fw {__version__}",
         "credit": "header decryption by Littlenine Ennea (github.com/LittlenineEnnea)",
         "slave": info.slave, "encslave": info.encslave,
         "files": [

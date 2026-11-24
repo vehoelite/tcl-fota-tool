@@ -244,7 +244,12 @@ class LoadWorker(QThread):
             self.loaded.emit(curef, info, plan)
         except Exception as e:  # noqa: BLE001
             reporting.report_exception(e, "list")   # type + tcl-fw frames only
-            self.failed.emit(str(e))
+            if fota.is_transient(e):  # already retried; say what to do instead of an exception name
+                self.failed.emit(str(e) if isinstance(e, fota.ServerError) else
+                                 f"Network problem talking to TCL's servers ({type(e).__name__}) - "
+                                 "already retried. Check the connection and try again in a few minutes.")
+            else:
+                self.failed.emit(str(e))
 
 
 class NameProbeWorker(QThread):
